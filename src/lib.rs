@@ -2,8 +2,8 @@ use std::borrow::Borrow;
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::ops::Deref;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use crossbeam_epoch::{Atomic, Owned};
 
@@ -16,14 +16,12 @@ type Cells<K, V> = [Atomic<Node<K, V>>; LEVEL_CELLS];
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct Leaf<K, V> {
-    data: (K, V)
+    data: (K, V),
 }
 
 impl<K, V> Leaf<K, V> {
     pub fn new(key: K, value: V) -> Self {
-        Self {
-            data: (key, value),
-        }
+        Self { data: (key, value) }
     }
 
     pub fn key(&self) -> &K {
@@ -108,13 +106,13 @@ where
                     Ok(_) => return None,
                     // Retry
                     Err(fail) => leaf = fail.new,
-                }
+                },
                 Some(Node::Leaf(old)) if &old.0 == leaf.key().unwrap() => {
                     match current.compare_and_set_weak(node, leaf, Ordering::AcqRel, &pin) {
                         // Replaced an old one. Return it, but destroy the internal node.
                         Ok(_) => {
                             unsafe { pin.defer_destroy(node) };
-                            return Some(Arc::clone(old))
+                            return Some(Arc::clone(old));
                         }
                         Err(fail) => leaf = fail.new,
                     }
@@ -228,8 +226,10 @@ impl<K, V, S> Drop for ConMap<K, V, S> {
                 let extract = extract.into_owned();
                 match extract.deref() {
                     Node::Leaf(_) => (),
-                    Node::Inner(inner) => for sub in inner {
-                        drop_recursive(sub);
+                    Node::Inner(inner) => {
+                        for sub in inner {
+                            drop_recursive(sub);
+                        }
                     }
                 }
                 drop(extract);
@@ -314,7 +314,8 @@ mod tests {
                         }
                     });
                 }
-            }).unwrap();
+            })
+            .unwrap();
 
             for i in 0..TEST_BATCH * TEST_THREADS {
                 assert_eq!(*map.get(&i).unwrap().value(), i);
@@ -339,7 +340,8 @@ mod tests {
                         }
                     });
                 }
-            }).unwrap();
+            })
+            .unwrap();
         }
     }
 }
