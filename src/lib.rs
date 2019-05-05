@@ -47,6 +47,58 @@ enum Node<K, V> {
     Collision(Box<[Arc<Leaf<K, V>>]>),
 }
 
+enum TraverseState<K, V, F> {
+    Empty, // Invalid temporary state.
+    Created(Arc<Leaf<K, V>>),
+    Future { key: K, constructor: F },
+}
+
+impl<K, V, F: FnOnce() -> V> TraverseState<K, V, F> {
+    fn key(&self) -> &K {
+        match self {
+            TraverseState::Empty => unreachable!("Not supposed to live in the empty state"),
+            TraverseState::Created(leaf) => leaf.key(),
+            TraverseState::Future { key, .. } => key,
+        }
+    }
+    fn leaf(&mut self) -> Arc<Leaf<K, V>> {
+        let (new_val, result) = match mem::replace(self, TraverseState::Empty) {
+            TraverseState::Empty => unreachable!("Not supposed to live in the empty state"),
+            TraverseState::Created(leaf) => (TraverseState::Created(Arc::clone(&leaf)), leaf),
+            TraverseState::Future { key, constructor } => {
+                let value = constructor();
+                let leaf = Arc::new(Leaf::new(key, value));
+                let created = TraverseState::Created(Arc::clone(&leaf));
+                (created, leaf)
+            }
+        };
+        *self = new_val;
+        result
+    }
+    fn leaf_owned(&mut self) -> Owned<Node<K, V>> {
+        Owned::new(Node::Leaf(self.leaf()))
+    }
+    fn into_leaf(self) -> Arc<Leaf<K, V>> {
+        match self {
+            TraverseState::Created(leaf) => leaf,
+            TraverseState::Future { key, constructor } => Arc::new(Leaf::new(key, constructor())),
+            TraverseState::Empty => unreachable!("Not supposed to live in the empty state"),
+        }
+    }
+    fn into_return(self, mode: TraverseMode) -> Option<Arc<Leaf<K, V>>> {
+        match mode {
+            TraverseMode::Overwrite => None,
+            TraverseMode::IfMissing => Some(self.into_leaf()),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum TraverseMode {
+    Overwrite,
+    IfMissing,
+}
+
 pub struct ConMap<K, V, S = RandomState> {
     hash_builder: S,
     root: Atomic<Node<K, V>>,
@@ -84,7 +136,21 @@ where
     }
 
     pub fn insert_leaf(&self, leaf: Arc<Leaf<K, V>>) -> Option<Arc<Leaf<K, V>>> {
-        let hash = self.hash(&leaf.0);
+        self.traverse(
+            TraverseState::<K, V, fn() -> V>::Created(leaf),
+            TraverseMode::Overwrite,
+        )
+    }
+
+    fn traverse<F>(
+        &self,
+        mut state: TraverseState<K, V, F>,
+        mode: TraverseMode,
+    ) -> Option<Arc<Leaf<K, V>>>
+    where
+        F: FnOnce() -> V,
+    {
+        let hash = self.hash(state.key());
         let mut shift = 0;
         let mut current = &self.root;
         let pin = crossbeam_epoch::pin();
@@ -101,32 +167,40 @@ where
                 }
                 result
             };
-            let replace_leaf = || replace(Owned::new(Node::Leaf(Arc::clone(&leaf))), true);
             match unsafe { node.as_ref() } {
                 Some(Node::Inner(inner)) => {
                     let bits = (hash >> shift) & LEVEL_MASK;
                     shift += LEVEL_BITS;
                     current = &inner[bits as usize];
                 }
+                // Not found, create it.
                 None => {
-                    if replace_leaf() {
-                        return None;
+                    if replace(state.leaf_owned(), true) {
+                        return state.into_return(mode);
                         // else -> retry
                     }
                 }
-                Some(Node::Leaf(old)) if &old.0 == leaf.key() => {
-                    if replace_leaf() {
-                        return Some(Arc::clone(old));
+                Some(Node::Leaf(old)) if &old.0 == state.key() => {
+                    // If we don't overwrite, we just return the found old value. If we do, try
+                    // doing so (and possibly fail & repeat the attempt).
+                    if mode == TraverseMode::Overwrite && !replace(state.leaf_owned(), true) {
+                        // Retry.
+                        continue;
                     }
+                    // Note: we abuse the epochs/pins. If we asked for replacement, by now we've
+                    // already scheduled the node containing old to be destroyed. But because we
+                    // haven't released the pin yet, it still exists so we can +1 the Arc.
+                    return Some(Arc::clone(old));
                 }
                 // Collision on the whole length of the hash :-(
                 Some(Node::Leaf(other)) if shift >= mem::size_of_val(&hash) * 8 => {
-                    let collision = Box::new([Arc::clone(other), Arc::clone(&leaf)]);
+                    let collision = Box::new([Arc::clone(other), state.leaf()]);
                     let collision = Owned::new(Node::Collision(collision));
                     if replace(collision, true) {
-                        return None;
+                        return state.into_return(mode);
                     }
                 }
+                // Not found, going to create it.
                 Some(Node::Leaf(other)) => {
                     // We need to add another level. Note: there *still* might be a collision.
                     // Therefore, we just add the level and try again.
@@ -142,27 +216,23 @@ where
                     // destroyed and we try splitting again.
                     replace(split, false);
                 }
-                Some(Node::Collision(collision)) => {
-                    let mut new_collision = Vec::with_capacity(collision.len() + 1);
-                    let mut old = None;
-                    new_collision.extend(
-                        collision
-                            .iter()
-                            .filter(|i| {
-                                if i.key() == leaf.key() {
-                                    old = Some(Arc::clone(i));
-                                    false
-                                } else {
-                                    true
-                                }
-                            })
-                            .cloned(),
-                    );
-                    new_collision.push(Arc::clone(&leaf));
-                    let new_node = Owned::new(Node::Collision(new_collision.into_boxed_slice()));
-                    if replace(new_node, true) {
-                        return old;
+                Some(Node::Collision(leaves)) => {
+                    let old = leaves
+                        .iter()
+                        .find(|l| l.key().borrow() == state.key())
+                        .map(Arc::clone);
+
+                    if old.is_none() || mode == TraverseMode::Overwrite {
+                        let mut new = Vec::with_capacity(leaves.len() + 1);
+                        new.extend(leaves.iter().filter(|l| l.key() != state.key()).cloned());
+                        new.push(state.leaf());
+                        let new = Owned::new(Node::Collision(new.into_boxed_slice()));
+                        if !replace(new, true) {
+                            continue;
+                        }
                     }
+
+                    return old.or_else(|| state.into_return(mode));
                 }
             }
         }
@@ -200,7 +270,12 @@ where
     where
         F: FnOnce() -> V,
     {
-        unimplemented!()
+        let state = TraverseState::Future {
+            key,
+            constructor: create,
+        };
+        self.traverse(state, TraverseMode::IfMissing)
+            .expect("Should have created one for me")
     }
 
     pub fn get_or_insert(&self, key: K, value: V) -> Arc<Leaf<K, V>> {
@@ -411,4 +486,6 @@ mod tests {
             assert_eq!(i + 1, *map.get(&i).unwrap().value());
         }
     }
+
+    // TODO: Tests for get_or_insert
 }
