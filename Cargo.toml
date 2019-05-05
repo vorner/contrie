@@ -6,3 +6,6 @@ edition = "2018"
 
 [dependencies]
 crossbeam-epoch = "~0.7"
+
+[dev-dependencies]
+crossbeam-utils = "~0.6"
