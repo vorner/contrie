@@ -47,23 +47,6 @@ enum Node<K, V> {
     Collision(Box<[Arc<Leaf<K, V>>]>),
 }
 
-impl<K, V> Node<K, V> {
-    fn key(&self) -> Option<&K> {
-        if let Node::Leaf(l) = self {
-            Some(&l.data.0)
-        } else {
-            None
-        }
-    }
-    fn leaf(&self) -> Option<Arc<Leaf<K, V>>> {
-        if let Node::Leaf(l) = self {
-            Some(Arc::clone(l))
-        } else {
-            None
-        }
-    }
-}
-
 pub struct ConMap<K, V, S = RandomState> {
     hash_builder: S,
     root: Atomic<Node<K, V>>,
@@ -103,59 +86,61 @@ where
     pub fn insert_leaf(&self, leaf: Arc<Leaf<K, V>>) -> Option<Arc<Leaf<K, V>>> {
         let hash = self.hash(&leaf.0);
         let mut shift = 0;
-        let mut leaf = Owned::new(Node::Leaf(leaf));
         let mut current = &self.root;
         let pin = crossbeam_epoch::pin();
         loop {
             let node = current.load(Ordering::Acquire, &pin);
+            let replace = |with, delete_previous| {
+                // If we fail to set it, the `with` is dropped together with the Err case, freeing
+                // whatever was inside it.
+                let result = current
+                    .compare_and_set_weak(node, with, Ordering::Release, &pin)
+                    .is_ok();
+                if result && !node.is_null() && delete_previous {
+                    unsafe { pin.defer_destroy(node) };
+                }
+                result
+            };
+            let replace_leaf = || replace(Owned::new(Node::Leaf(Arc::clone(&leaf))), true);
             match unsafe { node.as_ref() } {
-                None => match current.compare_and_set_weak(node, leaf, Ordering::Release, &pin) {
-                    // Didn't replace anything, so we are good.
-                    Ok(_) => return None,
-                    // Retry
-                    Err(fail) => leaf = fail.new,
-                },
-                Some(Node::Leaf(old)) if &old.0 == leaf.key().unwrap() => {
-                    match current.compare_and_set_weak(node, leaf, Ordering::AcqRel, &pin) {
-                        // Replaced an old one. Return it, but destroy the internal node.
-                        Ok(_) => {
-                            unsafe { pin.defer_destroy(node) };
-                            return Some(Arc::clone(old));
-                        }
-                        Err(fail) => leaf = fail.new,
+                Some(Node::Inner(inner)) => {
+                    let bits = (hash >> shift) & LEVEL_MASK;
+                    shift += LEVEL_BITS;
+                    current = &inner[bits as usize];
+                }
+                None => {
+                    if replace_leaf() {
+                        return None;
+                        // else -> retry
+                    }
+                }
+                Some(Node::Leaf(old)) if &old.0 == leaf.key() => {
+                    if replace_leaf() {
+                        return Some(Arc::clone(old));
                     }
                 }
                 // Collision on the whole length of the hash :-(
                 Some(Node::Leaf(other)) if shift >= mem::size_of_val(&hash) * 8 => {
-                    let collision = Box::new([Arc::clone(other), leaf.leaf().unwrap()]);
+                    let collision = Box::new([Arc::clone(other), Arc::clone(&leaf)]);
                     let collision = Owned::new(Node::Collision(collision));
-                    match current.compare_and_set_weak(node, collision, Ordering::Release, &pin) {
-                        Ok(_) => return None,
-                        Err(fail) => drop(fail.new),
+                    if replace(collision, true) {
+                        return None;
                     }
                 }
                 Some(Node::Leaf(other)) => {
                     // We need to add another level. Note: there *still* might be a collision.
                     // Therefore, we just add the level and try again.
-                    // FIXME: Once we have deletion, this should be adding & removing forever and
+                    // FIXME: Once we have deletion, this could be adding & removing forever and
                     // we need to do it in one step.
                     let other_hash = self.hash(&other.0);
                     let other_bits = (other_hash >> shift) & LEVEL_MASK;
                     let mut inner = Cells::default();
                     inner[other_bits as usize] = Atomic::from(node);
                     let split = Owned::new(Node::Inner(inner));
-                    match current.compare_and_set_weak(node, split, Ordering::Release, &pin) {
-                        // Just try going there once more
-                        Ok(_) => (),
-                        // Let's get rid of the one we didn't manage to put in. As it never left
-                        // our thread, we can just delete it right away.
-                        Err(fail) => drop(fail.new),
-                    }
-                }
-                Some(Node::Inner(inner)) => {
-                    let bits = (hash >> shift) & LEVEL_MASK;
-                    shift += LEVEL_BITS;
-                    current = &inner[bits as usize];
+                    // No matter if it succeeds or fails, we try again. We'll either find the newly
+                    // inserted value here and continue with another level down, or it gets
+                    // destroyed and we try splitting again.
+                    replace(split, false);
                 }
                 Some(Node::Collision(collision)) => {
                     let mut new_collision = Vec::with_capacity(collision.len() + 1);
@@ -164,7 +149,7 @@ where
                         collision
                             .iter()
                             .filter(|i| {
-                                if i.key() == leaf.key().unwrap() {
+                                if i.key() == leaf.key() {
                                     old = Some(Arc::clone(i));
                                     false
                                 } else {
@@ -173,12 +158,10 @@ where
                             })
                             .cloned(),
                     );
-                    new_collision.push(leaf.leaf().unwrap());
+                    new_collision.push(Arc::clone(&leaf));
                     let new_node = Owned::new(Node::Collision(new_collision.into_boxed_slice()));
-                    match current.compare_and_set(node, new_node, Ordering::Release, &pin) {
-                        Ok(_) => return old,
-                        // Replacement didn't work, try again.
-                        Err(fail) => drop(fail.new),
+                    if replace(new_node, true) {
+                        return old;
                     }
                 }
             }
