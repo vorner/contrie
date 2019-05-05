@@ -1,6 +1,7 @@
 use std::borrow::Borrow;
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hash, Hasher};
+use std::mem;
 use std::ops::Deref;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -43,13 +44,20 @@ impl<K, V> Deref for Leaf<K, V> {
 enum Node<K, V> {
     Inner(Cells<K, V>),
     Leaf(Arc<Leaf<K, V>>),
-    // TODO: Collision
+    Collision(Box<[Arc<Leaf<K, V>>]>),
 }
 
 impl<K, V> Node<K, V> {
     fn key(&self) -> Option<&K> {
         if let Node::Leaf(l) = self {
             Some(&l.data.0)
+        } else {
+            None
+        }
+    }
+    fn leaf(&self) -> Option<Arc<Leaf<K, V>>> {
+        if let Node::Leaf(l) = self {
+            Some(Arc::clone(l))
         } else {
             None
         }
@@ -117,10 +125,18 @@ where
                         Err(fail) => leaf = fail.new,
                     }
                 }
+                // Collision on the whole length of the hash :-(
+                Some(Node::Leaf(other)) if shift >= mem::size_of_val(&hash) * 8 => {
+                    let collision = Box::new([Arc::clone(other), leaf.leaf().unwrap()]);
+                    let collision = Owned::new(Node::Collision(collision));
+                    match current.compare_and_set_weak(node, collision, Ordering::Release, &pin) {
+                        Ok(_) => return None,
+                        Err(fail) => drop(fail.new),
+                    }
+                }
                 Some(Node::Leaf(other)) => {
                     // We need to add another level. Note: there *still* might be a collision.
                     // Therefore, we just add the level and try again.
-                    // FIXME: We may run out of hash bits here and go into a collision.
                     // FIXME: Once we have deletion, this should be adding & removing forever and
                     // we need to do it in one step.
                     let other_hash = self.hash(&other.0);
@@ -140,6 +156,30 @@ where
                     let bits = (hash >> shift) & LEVEL_MASK;
                     shift += LEVEL_BITS;
                     current = &inner[bits as usize];
+                }
+                Some(Node::Collision(collision)) => {
+                    let mut new_collision = Vec::with_capacity(collision.len() + 1);
+                    let mut old = None;
+                    new_collision.extend(
+                        collision
+                            .iter()
+                            .filter(|i| {
+                                if i.key() == leaf.key().unwrap() {
+                                    old = Some(Arc::clone(i));
+                                    false
+                                } else {
+                                    true
+                                }
+                            })
+                            .cloned(),
+                    );
+                    new_collision.push(leaf.leaf().unwrap());
+                    let new_node = Owned::new(Node::Collision(new_collision.into_boxed_slice()));
+                    match current.compare_and_set(node, new_node, Ordering::Release, &pin) {
+                        Ok(_) => return old,
+                        // Replacement didn't work, try again.
+                        Err(fail) => drop(fail.new),
+                    }
                 }
             }
         }
@@ -162,6 +202,12 @@ where
                     let bits = hash & LEVEL_MASK;
                     hash >>= LEVEL_BITS;
                     current = &inner[bits as usize];
+                }
+                Node::Collision(leaves) => {
+                    return leaves
+                        .iter()
+                        .find(|l| l.key().borrow() == key)
+                        .map(Arc::clone)
                 }
             }
         }
@@ -231,6 +277,7 @@ impl<K, V, S> Drop for ConMap<K, V, S> {
                             drop_recursive(sub);
                         }
                     }
+                    Node::Collision(_) => (),
                 }
                 drop(extract);
             }
@@ -342,6 +389,43 @@ mod tests {
                 }
             })
             .unwrap();
+        }
+    }
+
+    // A hasher to create collisions on purpose. Let's make the hash trie into a glorified array.
+    struct NoHasher;
+
+    impl Hasher for NoHasher {
+        fn finish(&self) -> u64 {
+            0
+        }
+
+        fn write(&mut self, _: &[u8]) {}
+    }
+
+    impl BuildHasher for NoHasher {
+        type Hasher = NoHasher;
+
+        fn build_hasher(&self) -> NoHasher {
+            NoHasher
+        }
+    }
+
+    #[test]
+    fn collisions() {
+        let map = ConMap::with_hasher(NoHasher);
+        // While their hash is the same under the hasher, they don't kick each other out.
+        for i in 1..42 {
+            assert!(map.insert(i, i).is_none());
+        }
+        // And all are present.
+        for i in 1..42 {
+            assert_eq!(i, *map.get(&i).unwrap().value());
+        }
+        // But reusing the key kick the other one out.
+        for i in 1..42 {
+            assert_eq!(i, *map.insert(i, i + 1).unwrap().value());
+            assert_eq!(i + 1, *map.get(&i).unwrap().value());
         }
     }
 }
