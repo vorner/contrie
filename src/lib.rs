@@ -352,6 +352,7 @@ mod tests {
 
     const TEST_THREADS: usize = 4;
     const TEST_BATCH: usize = 10000;
+    const TEST_BATCH_SMALL: usize = 100;
     const TEST_REP: usize = 20;
 
     #[test]
@@ -473,19 +474,59 @@ mod tests {
     fn collisions() {
         let map = ConMap::with_hasher(NoHasher);
         // While their hash is the same under the hasher, they don't kick each other out.
-        for i in 1..42 {
+        for i in 1..TEST_BATCH_SMALL {
             assert!(map.insert(i, i).is_none());
         }
         // And all are present.
-        for i in 1..42 {
+        for i in 1..TEST_BATCH_SMALL {
             assert_eq!(i, *map.get(&i).unwrap().value());
         }
-        // But reusing the key kick the other one out.
-        for i in 1..42 {
+        // But reusing the key kicks the other one out.
+        for i in 1..TEST_BATCH_SMALL {
             assert_eq!(i, *map.insert(i, i + 1).unwrap().value());
             assert_eq!(i + 1, *map.get(&i).unwrap().value());
         }
     }
 
-    // TODO: Tests for get_or_insert
+    #[test]
+    fn get_or_insert_empty() {
+        let map = ConMap::new();
+        let val = map.get_or_insert("hello", 42);
+        assert_eq!(42, *val.value());
+        assert_eq!("hello", *val.key());
+    }
+
+    #[test]
+    fn get_or_insert_existing() {
+        let map = ConMap::new();
+        assert!(map.insert("hello", 42).is_none());
+        let val = map.get_or_insert("hello", 0);
+        // We still have the original
+        assert_eq!(42, *val.value());
+        assert_eq!("hello", *val.key());
+    }
+
+    fn get_or_insert_many_inner<H: BuildHasher>(map: ConMap<usize, usize, H>, len: usize) {
+        for i in 1..len {
+            let val = map.get_or_insert(i, i);
+            assert_eq!(i, *val.key());
+            assert_eq!(i, *val.value());
+        }
+
+        for i in 1..len {
+            let val = map.get_or_insert(i, 0);
+            assert_eq!(i, *val.key());
+            assert_eq!(i, *val.value());
+        }
+    }
+
+    #[test]
+    fn get_or_insert_many() {
+        get_or_insert_many_inner(ConMap::new(), TEST_BATCH);
+    }
+
+    #[test]
+    fn get_or_insert_collision() {
+        get_or_insert_many_inner(ConMap::with_hasher(NoHasher), TEST_BATCH_SMALL);
+    }
 }
