@@ -6,7 +6,7 @@ use std::ops::Deref;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use crossbeam_epoch::{Atomic, Owned};
+use crossbeam_epoch::{Atomic, Owned, Shared};
 
 // All directly written, some things are not const fn yet :-(. But tested below.
 const LEVEL_BITS: usize = 4;
@@ -257,10 +257,7 @@ where
                     current = &inner[bits as usize];
                 }
                 Node::Collision(leaves) => {
-                    return leaves
-                        .iter()
-                        .find(|l| l.key().borrow() == key)
-                        .map(Arc::clone)
+                    return leaves.iter().find(|l| l.key().borrow() == key).cloned()
                 }
             }
         }
@@ -294,7 +291,59 @@ where
         Q: ?Sized + Eq + Hash,
         K: Borrow<Q>,
     {
-        unimplemented!()
+        let mut current = &self.root;
+        let hash = self.hash(key);
+        let pin = crossbeam_epoch::pin();
+        let mut shift = 0;
+        loop {
+            let node = current.load(Ordering::Acquire, &pin);
+            let replace = |with| {
+                let result = current
+                    .compare_and_set_weak(node, with, Ordering::Release, &pin)
+                    .is_ok();
+                if result {
+                    unsafe {
+                        pin.defer_destroy(node);
+                    }
+                }
+                result
+            };
+            match unsafe { node.as_ref() }? {
+                Node::Leaf(leaf) if leaf.0.borrow() == key => {
+                    if replace(Shared::null()) {
+                        return Some(Arc::clone(leaf));
+                    } // else ‒ something has changed, retry
+                }
+                Node::Leaf(_) => return None,
+                Node::Inner(inner) => {
+                    // TODO: We want to put things onto stack here somehow so we can do cleanups
+                    // later on.
+                    let bits = (hash >> shift) & LEVEL_MASK;
+                    shift += LEVEL_BITS;
+                    current = &inner[bits as usize];
+                }
+                Node::Collision(leaves) => {
+                    let mut deleted = None;
+                    let new = leaves
+                        .iter()
+                        .filter(|l| {
+                            if l.key().borrow() == key {
+                                deleted = Some(Arc::clone(l));
+                                false
+                            } else {
+                                true
+                            }
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let new = Owned::new(Node::Collision(new.into_boxed_slice()));
+                    if deleted.is_some() && !replace(new.into_shared(&pin)) {
+                        continue;
+                    }
+                    return deleted;
+                }
+            }
+        }
     }
 
     // TODO: Iteration & friends
