@@ -523,15 +523,15 @@ mod tests {
     fn collisions() {
         let map = ConMap::with_hasher(NoHasher);
         // While their hash is the same under the hasher, they don't kick each other out.
-        for i in 1..TEST_BATCH_SMALL {
+        for i in 0..TEST_BATCH_SMALL {
             assert!(map.insert(i, i).is_none());
         }
         // And all are present.
-        for i in 1..TEST_BATCH_SMALL {
+        for i in 0..TEST_BATCH_SMALL {
             assert_eq!(i, *map.get(&i).unwrap().value());
         }
         // But reusing the key kicks the other one out.
-        for i in 1..TEST_BATCH_SMALL {
+        for i in 0..TEST_BATCH_SMALL {
             assert_eq!(i, *map.insert(i, i + 1).unwrap().value());
             assert_eq!(i + 1, *map.get(&i).unwrap().value());
         }
@@ -556,13 +556,13 @@ mod tests {
     }
 
     fn get_or_insert_many_inner<H: BuildHasher>(map: ConMap<usize, usize, H>, len: usize) {
-        for i in 1..len {
+        for i in 0..len {
             let val = map.get_or_insert(i, i);
             assert_eq!(i, *val.key());
             assert_eq!(i, *val.value());
         }
 
-        for i in 1..len {
+        for i in 0..len {
             let val = map.get_or_insert(i, 0);
             assert_eq!(i, *val.key());
             assert_eq!(i, *val.value());
@@ -577,5 +577,37 @@ mod tests {
     #[test]
     fn get_or_insert_collision() {
         get_or_insert_many_inner(ConMap::with_hasher(NoHasher), TEST_BATCH_SMALL);
+    }
+
+    #[test]
+    fn simple_remove() {
+        let map = ConMap::new();
+        assert!(map.remove(&42).is_none());
+        assert!(map.insert(42, "hello").is_none());
+        assert_eq!("hello", *map.get(&42).unwrap().value());
+        assert_eq!("hello", *map.remove(&42).unwrap().value());
+        assert!(map.get(&42).is_none());
+        assert!(map.remove(&42).is_none());
+    }
+
+    fn remove_many_inner<H: BuildHasher>(map: ConMap<usize, usize, H>, len: usize) {
+        for i in 0..len {
+            assert!(map.insert(i, i).is_none());
+        }
+        for i in 0..len {
+            assert_eq!(i, *map.get(&i).unwrap().value());
+            assert_eq!(i, *map.remove(&i).unwrap().value());
+            assert!(map.get(&i).is_none());
+        }
+    }
+
+    #[test]
+    fn remove_many() {
+        remove_many_inner(ConMap::new(), TEST_BATCH);
+    }
+
+    #[test]
+    fn remove_many_collision() {
+        remove_many_inner(ConMap::with_hasher(NoHasher), TEST_BATCH_SMALL);
     }
 }
