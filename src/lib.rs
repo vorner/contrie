@@ -336,7 +336,12 @@ where
                         })
                         .cloned()
                         .collect::<Vec<_>>();
-                    let new = Owned::new(Node::Collision(new.into_boxed_slice()));
+                    let new = if new.len() == 1 {
+                        Node::Leaf(new.into_iter().nth(0).unwrap())
+                    } else {
+                        Node::Collision(new.into_boxed_slice())
+                    };
+                    let new = Owned::new(new);
                     if deleted.is_some() && !replace(new.into_shared(&pin)) {
                         continue;
                     }
@@ -609,5 +614,40 @@ mod tests {
     #[test]
     fn remove_many_collision() {
         remove_many_inner(ConMap::with_hasher(NoHasher), TEST_BATCH_SMALL);
+    }
+
+    #[test]
+    fn collision_remove_one_left() {
+        let pin = crossbeam_epoch::pin();
+        let map = ConMap::with_hasher(NoHasher);
+        map.insert(1, 1);
+        map.insert(2, 2);
+        let find_leaf = || {
+            let mut cur = &map.root;
+            // Relaxed ‒ we are the only thread around
+            loop {
+                match unsafe { cur.load(Ordering::Relaxed, &pin).deref() } {
+                    Node::Inner(cells) => {
+                        cur = cells
+                            .iter()
+                            .find(|c| !c.load(Ordering::Relaxed, &pin).is_null())
+                            .expect("Empty inner node");
+                    }
+                    leaf => return leaf,
+                }
+            }
+        };
+
+        match find_leaf() {
+            Node::Collision(leaves) => assert_eq!(2, leaves.len()),
+            _ => panic!("Wrong kind of a leaf"),
+        }
+
+        map.remove(&2);
+
+        match find_leaf() {
+            Node::Leaf(leaf) => assert_eq!(1, *leaf.key()),
+            _ => panic!("Wrong kind of a leaf"),
+        }
     }
 }
