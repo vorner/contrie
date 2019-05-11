@@ -43,8 +43,7 @@ impl<K, V> Deref for Leaf<K, V> {
 
 enum Node<K, V> {
     Inner(Cells<K, V>),
-    Leaf(Arc<Leaf<K, V>>),
-    Collision(Box<[Arc<Leaf<K, V>>]>),
+    Data(Box<[Arc<Leaf<K, V>>]>),
 }
 
 enum TraverseState<K, V, F> {
@@ -75,8 +74,9 @@ impl<K, V, F: FnOnce() -> V> TraverseState<K, V, F> {
         *self = new_val;
         result
     }
-    fn leaf_owned(&mut self) -> Owned<Node<K, V>> {
-        Owned::new(Node::Leaf(self.leaf()))
+    fn data_owned(&mut self) -> Owned<Node<K, V>> {
+        let data = vec![self.leaf()];
+        Owned::new(Node::Data(data.into_boxed_slice()))
     }
     fn into_leaf(self) -> Arc<Leaf<K, V>> {
         match self {
@@ -175,38 +175,25 @@ where
                 }
                 // Not found, create it.
                 None => {
-                    if replace(state.leaf_owned(), true) {
+                    if replace(state.data_owned(), true) {
                         return state.into_return(mode);
                         // else -> retry
                     }
                 }
-                Some(Node::Leaf(old)) if &old.0 == state.key() => {
-                    // If we don't overwrite, we just return the found old value. If we do, try
-                    // doing so (and possibly fail & repeat the attempt).
-                    if mode == TraverseMode::Overwrite && !replace(state.leaf_owned(), true) {
-                        // Retry.
-                        continue;
-                    }
-                    // Note: we abuse the epochs/pins. If we asked for replacement, by now we've
-                    // already scheduled the node containing old to be destroyed. But because we
-                    // haven't released the pin yet, it still exists so we can +1 the Arc.
-                    return Some(Arc::clone(old));
-                }
-                // Collision on the whole length of the hash :-(
-                Some(Node::Leaf(other)) if shift >= mem::size_of_val(&hash) * 8 => {
-                    let collision = Box::new([Arc::clone(other), state.leaf()]);
-                    let collision = Owned::new(Node::Collision(collision));
-                    if replace(collision, true) {
-                        return state.into_return(mode);
-                    }
-                }
-                // Not found, going to create it.
-                Some(Node::Leaf(other)) => {
+                // There's one data node at this pointer, but we want to place a different one here
+                // too. So we create a new level, push the old one down. Note that we check both
+                // that we are adding something else & that we still have some more bits to
+                // distinguish by.
+                Some(Node::Data(data))
+                    if data.len() == 1
+                        && data[0].key() != state.key()
+                        && shift < mem::size_of_val(&hash) * 8 =>
+                {
                     // We need to add another level. Note: there *still* might be a collision.
                     // Therefore, we just add the level and try again.
                     // FIXME: Once we have deletion, this could be adding & removing forever and
                     // we need to do it in one step.
-                    let other_hash = self.hash(&other.0);
+                    let other_hash = self.hash(data[0].key());
                     let other_bits = (other_hash >> shift) & LEVEL_MASK;
                     let mut inner = Cells::default();
                     inner[other_bits as usize] = Atomic::from(node);
@@ -216,17 +203,22 @@ where
                     // destroyed and we try splitting again.
                     replace(split, false);
                 }
-                Some(Node::Collision(leaves)) => {
-                    let old = leaves
+                // All the other cases:
+                // * It has the same key
+                // * There's already a collision on this level (because we've already run out of
+                //   bits previously).
+                // * We've run out of the hash bits so there's nothing to split by any more.
+                Some(Node::Data(data)) => {
+                    let old = data
                         .iter()
                         .find(|l| l.key().borrow() == state.key())
                         .map(Arc::clone);
 
                     if old.is_none() || mode == TraverseMode::Overwrite {
-                        let mut new = Vec::with_capacity(leaves.len() + 1);
-                        new.extend(leaves.iter().filter(|l| l.key() != state.key()).cloned());
+                        let mut new = Vec::with_capacity(data.len() + 1);
+                        new.extend(data.iter().filter(|l| l.key() != state.key()).cloned());
                         new.push(state.leaf());
-                        let new = Owned::new(Node::Collision(new.into_boxed_slice()));
+                        let new = Owned::new(Node::Data(new.into_boxed_slice()));
                         if !replace(new, true) {
                             continue;
                         }
@@ -249,16 +241,12 @@ where
         loop {
             let node = current.load(Ordering::Acquire, &pin);
             match unsafe { node.as_ref() }? {
-                Node::Leaf(leaf) if leaf.0.borrow() == key => return Some(Arc::clone(leaf)),
-                Node::Leaf(_) => return None,
                 Node::Inner(inner) => {
                     let bits = hash & LEVEL_MASK;
                     hash >>= LEVEL_BITS;
                     current = &inner[bits as usize];
                 }
-                Node::Collision(leaves) => {
-                    return leaves.iter().find(|l| l.key().borrow() == key).cloned()
-                }
+                Node::Data(data) => return data.iter().find(|l| l.key().borrow() == key).cloned(),
             }
         }
     }
@@ -309,12 +297,6 @@ where
                 result
             };
             match unsafe { node.as_ref() }? {
-                Node::Leaf(leaf) if leaf.0.borrow() == key => {
-                    if replace(Shared::null()) {
-                        return Some(Arc::clone(leaf));
-                    } // else ‒ something has changed, retry
-                }
-                Node::Leaf(_) => return None,
                 Node::Inner(inner) => {
                     // TODO: We want to put things onto stack here somehow so we can do cleanups
                     // later on.
@@ -322,9 +304,9 @@ where
                     shift += LEVEL_BITS;
                     current = &inner[bits as usize];
                 }
-                Node::Collision(leaves) => {
+                Node::Data(data) => {
                     let mut deleted = None;
-                    let new = leaves
+                    let new = data
                         .iter()
                         .filter(|l| {
                             if l.key().borrow() == key {
@@ -336,13 +318,12 @@ where
                         })
                         .cloned()
                         .collect::<Vec<_>>();
-                    let new = if new.len() == 1 {
-                        Node::Leaf(new.into_iter().nth(0).unwrap())
+                    let new = if new.is_empty() {
+                        Shared::null()
                     } else {
-                        Node::Collision(new.into_boxed_slice())
+                        Owned::new(Node::Data(new.into_boxed_slice())).into_shared(&pin)
                     };
-                    let new = Owned::new(new);
-                    if deleted.is_some() && !replace(new.into_shared(&pin)) {
+                    if deleted.is_some() && !replace(new) {
                         continue;
                     }
                     return deleted;
@@ -383,13 +364,12 @@ impl<K, V, S> Drop for ConMap<K, V, S> {
             if !extract.is_null() {
                 let extract = extract.into_owned();
                 match extract.deref() {
-                    Node::Leaf(_) => (),
                     Node::Inner(inner) => {
                         for sub in inner {
                             drop_recursive(sub);
                         }
                     }
-                    Node::Collision(_) => (),
+                    Node::Data(_) => (),
                 }
                 drop(extract);
             }
@@ -622,7 +602,7 @@ mod tests {
         let map = ConMap::with_hasher(NoHasher);
         map.insert(1, 1);
         map.insert(2, 2);
-        let find_leaf = || {
+        let find_data = || -> Option<_> {
             let mut cur = &map.root;
             // Relaxed ‒ we are the only thread around
             loop {
@@ -630,24 +610,27 @@ mod tests {
                     Node::Inner(cells) => {
                         cur = cells
                             .iter()
-                            .find(|c| !c.load(Ordering::Relaxed, &pin).is_null())
-                            .expect("Empty inner node");
+                            .find(|c| !c.load(Ordering::Relaxed, &pin).is_null())?;
                     }
-                    leaf => return leaf,
+                    data => return Some(data),
                 }
             }
         };
 
-        match find_leaf() {
-            Node::Collision(leaves) => assert_eq!(2, leaves.len()),
+        match find_data().expect("Leaf missing") {
+            Node::Data(data) => assert_eq!(2, data.len()),
             _ => panic!("Wrong kind of a leaf"),
         }
 
-        map.remove(&2);
+        assert!(map.remove(&2).is_some());
 
-        match find_leaf() {
-            Node::Leaf(leaf) => assert_eq!(1, *leaf.key()),
+        match find_data().expect("Leaf missing") {
+            Node::Data(data) => assert_eq!(1, data.len()),
             _ => panic!("Wrong kind of a leaf"),
         }
+
+        assert!(map.remove(&1).is_some());
+
+        assert!(find_data().is_none());
     }
 }
