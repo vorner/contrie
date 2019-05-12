@@ -7,6 +7,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use crossbeam_epoch::{Atomic, Owned, Shared};
+use smallvec::SmallVec;
 
 // All directly written, some things are not const fn yet :-(. But tested below.
 const LEVEL_BITS: usize = 4;
@@ -41,9 +42,19 @@ impl<K, V> Deref for Leaf<K, V> {
     }
 }
 
+// Instead of distinguishing the very common case of single leaf and collision list in our code, we
+// just handle everything as a list, possibly with 1 element.
+//
+// However, as the case with 1 element is much more probable, we don't want the Vec indirection
+// there, so we let SmallVec to handle it by not spilling in that case. As the spilled Vec needs 2
+// words in addition to the length (pointer and capacity), we have room for 2 Arcs in the not
+// spilled case too, so we as well might take advantage of it.
+// TODO: We want the union feature.
+type Data<K, V> = SmallVec<[Arc<Leaf<K, V>>; 2]>;
+
 enum Node<K, V> {
     Inner(Cells<K, V>),
-    Data(Box<[Arc<Leaf<K, V>>]>),
+    Data(Data<K, V>),
 }
 
 enum TraverseState<K, V, F> {
@@ -75,8 +86,9 @@ impl<K, V, F: FnOnce() -> V> TraverseState<K, V, F> {
         result
     }
     fn data_owned(&mut self) -> Owned<Node<K, V>> {
-        let data = vec![self.leaf()];
-        Owned::new(Node::Data(data.into_boxed_slice()))
+        let mut data = Data::new();
+        data.push(self.leaf());
+        Owned::new(Node::Data(data))
     }
     fn into_leaf(self) -> Arc<Leaf<K, V>> {
         match self {
@@ -215,10 +227,11 @@ where
                         .map(Arc::clone);
 
                     if old.is_none() || mode == TraverseMode::Overwrite {
-                        let mut new = Vec::with_capacity(data.len() + 1);
+                        let mut new = Data::with_capacity(data.len() + 1);
                         new.extend(data.iter().filter(|l| l.key() != state.key()).cloned());
                         new.push(state.leaf());
-                        let new = Owned::new(Node::Data(new.into_boxed_slice()));
+                        new.shrink_to_fit();
+                        let new = Owned::new(Node::Data(new));
                         if !replace(new, true) {
                             continue;
                         }
@@ -317,11 +330,11 @@ where
                             }
                         })
                         .cloned()
-                        .collect::<Vec<_>>();
+                        .collect::<Data<_, _>>();
                     let new = if new.is_empty() {
                         Shared::null()
                     } else {
-                        Owned::new(Node::Data(new.into_boxed_slice())).into_shared(&pin)
+                        Owned::new(Node::Data(new)).into_shared(&pin)
                     };
                     if deleted.is_some() && !replace(new) {
                         continue;
