@@ -6,7 +6,7 @@ use std::ops::Deref;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use crossbeam_epoch::{Atomic, Owned, Shared};
+use crossbeam_epoch::{Atomic, Guard, Owned, Shared};
 use smallvec::SmallVec;
 
 // All directly written, some things are not const fn yet :-(. But tested below.
@@ -14,7 +14,11 @@ const LEVEL_BITS: usize = 4;
 const LEVEL_MASK: u64 = 0b1111;
 const LEVEL_CELLS: usize = 16;
 
-type Cells<K, V> = [Atomic<Node<K, V>>; LEVEL_CELLS];
+// The Inner containing this pointer is condemned to replacement/pruning.
+// Any pointer marked as condemned must never ever change.
+const FLAG_CONDEMNED: usize = 0b1;
+
+type Inner<K, V> = [Atomic<Node<K, V>>; LEVEL_CELLS];
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct Leaf<K, V> {
@@ -53,7 +57,7 @@ impl<K, V> Deref for Leaf<K, V> {
 type Data<K, V> = SmallVec<[Arc<Leaf<K, V>>; 2]>;
 
 enum Node<K, V> {
-    Inner(Cells<K, V>),
+    Inner(Inner<K, V>),
     Data(Data<K, V>),
 }
 
@@ -111,6 +115,19 @@ enum TraverseMode {
     IfMissing,
 }
 
+/// How well pruning went.
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum PruneResult {
+    /// Removed the node completely, inserted NULL into the parent.
+    Null,
+    /// Contracted an edge, inserted a lone child.
+    Singleton,
+    /// Made a copy, as there were multiple pointers leading from the child.
+    Copy,
+    /// Failed to update the parent, some other thread updated it in the meantime.
+    CasFail,
+}
+
 pub struct ConMap<K, V, S = RandomState> {
     hash_builder: S,
     root: Atomic<Node<K, V>>,
@@ -152,6 +169,89 @@ where
             TraverseState::<K, V, fn() -> V>::Created(leaf),
             TraverseMode::Overwrite,
         )
+    }
+
+    /// Prunes the given node.
+    ///
+    /// * The parent points to the child node.
+    /// * The child must be valid pointer, of course.
+    ///
+    /// The parent is made to point to either:
+    /// * NULL if child is empty.
+    /// * child's only child.
+    /// * A copy of child.
+    ///
+    /// Returns how the pruning went.
+    unsafe fn prune(
+        pin: &Guard,
+        parent: &Atomic<Node<K, V>>,
+        child: Shared<Node<K, V>>,
+    ) -> PruneResult {
+        let inner = match child.as_ref() {
+            Some(Node::Inner(inner)) => inner,
+            _ => unreachable!("Invalid child node passed to prune"),
+        };
+        let mut only_child = None;
+        let mut many = false;
+        let mut new_child = Inner::default();
+
+        // 1. Mark all the cells in this one as condemned.
+        // 2. Look how many non-null branches are leading from there.
+        // 3. Construct a copy of the child *without* the tags on the way.
+        for (new, grandchild) in new_child.iter_mut().zip(inner) {
+            // Acquire ‒ we don't need the grandchild ourselves, only the pointer. But we'll need
+            // to "republish" it through the parent pointer later on and for that we have to get it
+            // first.
+            //
+            // FIXME: Do we actually need SeqCst here to order it relative to the CAS below?
+            let gc = grandchild
+                .fetch_or(FLAG_CONDEMNED, Ordering::Acquire, pin)
+                .with_tag(0);
+            if !gc.is_null() {
+                let prev = only_child.replace(gc);
+                many = prev.is_some();
+            }
+
+            *new = Atomic::from(gc);
+        }
+
+        // Now, decide what we want to put into the parent.
+        let mut cleanup = None;
+        let (insert, prune_result) = match (many, only_child) {
+            // If there's exactly one child, we just contract the edge to lead there directly.
+            (false, Some(child)) => (child, PruneResult::Singleton),
+            // If there's nothing, simply kill the node outright.
+            (false, None) => (Shared::null(), PruneResult::Null),
+            // Many nodes ‒ someone must have inserted in between. But we've already condemned this
+            // node, so create a new one and do the replacement.
+            (true, Some(_)) => {
+                let new = Owned::new(Node::Inner(new_child)).into_shared(pin);
+                // Note: we don't store Owned, because we may link it in. If we panicked before
+                // disarming it, it would delete something linked in, which is bad. Instead, we
+                // prefer deleting manually after the fact.
+                cleanup = Some(new);
+                (new, PruneResult::Copy)
+            }
+            _ => unreachable!(),
+        };
+
+        assert_eq!(0, child.tag(), "Attempt to replace condemned pointer");
+        // Orderings: We need to publish the new node. We don't need to acquire the previous value
+        // to destroy, because we already have it in case of success and we don't care about it on
+        // failure.
+        let result = parent
+            .compare_and_set_weak(child, insert, (Ordering::Release, Ordering::Relaxed), pin)
+            .is_ok();
+        if result {
+            // We successfully unlinked the old child, so it's time to destroy it (as soon as
+            // nobody is looking at it).
+            pin.defer_destroy(child);
+            prune_result
+        } else {
+            // We have failed to insert, so we need to clean up after ourselves.
+            drop(cleanup.map(|c| Shared::into_owned(c)));
+            PruneResult::CasFail
+        }
     }
 
     fn traverse<F>(
@@ -207,7 +307,7 @@ where
                     // we need to do it in one step.
                     let other_hash = self.hash(data[0].key());
                     let other_bits = (other_hash >> shift) & LEVEL_MASK;
-                    let mut inner = Cells::default();
+                    let mut inner = Inner::default();
                     inner[other_bits as usize] = Atomic::from(node);
                     let split = Owned::new(Node::Inner(inner));
                     // No matter if it succeeds or fails, we try again. We'll either find the newly
@@ -620,8 +720,8 @@ mod tests {
             // Relaxed ‒ we are the only thread around
             loop {
                 match unsafe { cur.load(Ordering::Relaxed, &pin).deref() } {
-                    Node::Inner(cells) => {
-                        cur = cells
+                    Node::Inner(inner) => {
+                        cur = inner
                             .iter()
                             .find(|c| !c.load(Ordering::Relaxed, &pin).is_null())?;
                     }
