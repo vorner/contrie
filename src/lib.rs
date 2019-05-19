@@ -9,6 +9,9 @@ use std::sync::Arc;
 use crossbeam_epoch::{Atomic, Guard, Owned, Shared};
 use smallvec::SmallVec;
 
+// TODO: Rename Leaf. It's a public name and a bit silly/leaks implementation details.
+// TODO: Make this whole type private and implement better/all APIs around it?
+
 // All directly written, some things are not const fn yet :-(. But tested below.
 const LEVEL_BITS: usize = 4;
 const LEVEL_MASK: u64 = 0b1111;
