@@ -169,6 +169,7 @@ where
 
     pub fn insert_leaf(&self, leaf: Arc<Leaf<K, V>>) -> Option<Arc<Leaf<K, V>>> {
         self.traverse(
+            // Any way to do it without the type parameters here? Older rustc doesn't like them.
             TraverseState::<K, V, fn() -> V>::Created(leaf),
             TraverseMode::Overwrite,
         )
@@ -379,6 +380,7 @@ where
             .expect("Should have created one for me")
     }
 
+    // TODO: Return a tuple if it inserted a new one or found existing.
     pub fn get_or_insert(&self, key: K, value: V) -> Arc<Leaf<K, V>> {
         self.get_or_insert_with(key, || value)
     }
