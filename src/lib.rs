@@ -207,8 +207,9 @@ where
             Some(Node::Inner(inner)) => inner,
             _ => unreachable!("Invalid child node passed to prune"),
         };
-        let mut only_child = None;
-        let mut many = false;
+        let mut allow_contract = true;
+        let mut child_cnt = 0;
+        let mut last_leaf = None;
         let mut new_child = Inner::default();
 
         // 1. Mark all the cells in this one as condemned.
@@ -223,9 +224,18 @@ where
             let gc = grandchild
                 .fetch_or(NodeFlags::CONDEMNED.bits(), Ordering::Acquire, pin)
                 .with_tag(0);
-            if !gc.is_null() {
-                let prev = only_child.replace(gc);
-                many = prev.is_some();
+            match gc.as_ref() {
+                Some(Node::Data(_)) => {
+                    last_leaf.replace(gc);
+                    child_cnt += 1;
+                }
+                // If we have an inner node here, multiple leaves hang somewhere below there. More
+                // importantly, we can't contrack the edge.
+                Some(Node::Inner(_)) => {
+                    allow_contract = false;
+                    child_cnt += 1;
+                }
+                None => (),
             }
 
             *new = Atomic::from(gc);
@@ -233,14 +243,16 @@ where
 
         // Now, decide what we want to put into the parent.
         let mut cleanup = None;
-        let (insert, prune_result) = match (many, only_child) {
-            // If there's exactly one child, we just contract the edge to lead there directly.
-            (false, Some(child)) => (child, PruneResult::Singleton),
+        let (insert, prune_result) = match (allow_contract, child_cnt, last_leaf) {
+            // If there's exactly one leaf, we just contract the edge to lead there directly. Note
+            // that we can't do that if this is not the leaf, because we would mess up the hash
+            // matching on the way. But that's fine, we checked that above.
+            (true, 1, Some(child)) => (child, PruneResult::Singleton),
             // If there's nothing, simply kill the node outright.
-            (false, None) => (Shared::null(), PruneResult::Null),
-            // Many nodes ‒ someone must have inserted in between. But we've already condemned this
-            // node, so create a new one and do the replacement.
-            (true, Some(_)) => {
+            (_, 0, None) => (Shared::null(), PruneResult::Null),
+            // Many nodes (maybe somewhere below) ‒ someone must have inserted in between. But
+            // we've already condemned this node, so create a new one and do the replacement.
+            _ => {
                 let new = Owned::new(Node::Inner(new_child)).into_shared(pin);
                 // Note: we don't store Owned, because we may link it in. If we panicked before
                 // disarming it, it would delete something linked in, which is bad. Instead, we
@@ -248,7 +260,6 @@ where
                 cleanup = Some(new);
                 (new, PruneResult::Copy)
             }
-            _ => unreachable!(),
         };
 
         assert_eq!(0, child.tag(), "Attempt to replace condemned pointer");
@@ -289,6 +300,9 @@ where
             if flags.contains(NodeFlags::CONDEMNED) {
                 // This one is going away. We are not allowed to modify the cell, we just have to
                 // replace the inner node first. So, let's do some cleanup.
+                //
+                // TODO: In some cases we would not really *have* to do this (in particular, if we
+                // just want to walk through and not modify it here at all, it's OK).
                 unsafe {
                     Self::prune(&pin, parent.expect("Condemned the root!"), node);
                 }
