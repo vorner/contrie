@@ -281,9 +281,26 @@ where
         let hash = self.hash(state.key());
         let mut shift = 0;
         let mut current = &self.root;
+        let mut parent = None;
         let pin = crossbeam_epoch::pin();
         loop {
             let node = current.load(Ordering::Acquire, &pin);
+            let flags = NodeFlags::from_bits(node.tag()).expect("Invalid bit in pointer tag set");
+            if flags.contains(NodeFlags::CONDEMNED) {
+                // This one is going away. We are not allowed to modify the cell, we just have to
+                // replace the inner node first. So, let's do some cleanup.
+                unsafe {
+                    Self::prune(&pin, parent.expect("Condemned the root!"), node);
+                }
+                // TODO: Either us or someone else modified the tree on our path. In many cases we
+                // could just continue here, but some cases are complex. For now, we just restart
+                // the whole traversal and try from the start, for simplicity. This should be rare
+                // anyway.
+                shift = 0;
+                current = &self.root;
+                parent = None;
+                continue;
+            }
             let replace = |with, delete_previous| {
                 // If we fail to set it, the `with` is dropped together with the Err case, freeing
                 // whatever was inside it.
@@ -299,6 +316,7 @@ where
                 Some(Node::Inner(inner)) => {
                     let bits = (hash >> shift) & LEVEL_MASK;
                     shift += LEVEL_BITS;
+                    parent = Some(current);
                     current = &inner[bits as usize];
                 }
                 // Not found, create it.
