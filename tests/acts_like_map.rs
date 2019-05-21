@@ -82,6 +82,9 @@ fn insert_parallel_test<T: Clone + Hash + Eq + Send + Sync>(
     Ok(())
 }
 
+// TODO: Do the same set of tests with some lousy hasher? One that hashes a bit, but has a lot of
+// collisions?
+
 proptest! {
     #[test]
     fn small_keys(instructions in vec(Instruction::<u8, usize>::strategy(), 1..10_000)) {

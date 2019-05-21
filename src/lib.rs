@@ -6,6 +6,7 @@ use std::ops::Deref;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use bitflags::bitflags;
 use crossbeam_epoch::{Atomic, Guard, Owned, Shared};
 use smallvec::SmallVec;
 
@@ -17,9 +18,20 @@ const LEVEL_BITS: usize = 4;
 const LEVEL_MASK: u64 = 0b1111;
 const LEVEL_CELLS: usize = 16;
 
-// The Inner containing this pointer is condemned to replacement/pruning.
-// Any pointer marked as condemned must never ever change.
-const FLAG_CONDEMNED: usize = 0b1;
+bitflags! {
+    /// Flags that can be put onto a pointer pointing to a node, specifying some interesting
+    /// things.
+    ///
+    /// Note that this lives inside the unused bits of a pointer. All nodes align at least to a
+    /// machine word and we assume it's at least 32bits, so we have at least 2 bits.
+    struct NodeFlags: usize {
+        /// The Inner containing this pointer is condemned to replacement/pruning.
+        ///
+        /// Changing this pointer is pointer is forbidden, and the containing Inner needs to be
+        /// replaced first with a clean one.
+        const CONDEMNED = 0b1;
+    }
+}
 
 type Inner<K, V> = [Atomic<Node<K, V>>; LEVEL_CELLS];
 
@@ -208,7 +220,7 @@ where
             //
             // FIXME: Do we actually need SeqCst here to order it relative to the CAS below?
             let gc = grandchild
-                .fetch_or(FLAG_CONDEMNED, Ordering::Acquire, pin)
+                .fetch_or(NodeFlags::CONDEMNED.bits(), Ordering::Acquire, pin)
                 .with_tag(0);
             if !gc.is_null() {
                 let prev = only_child.replace(gc);
