@@ -6,6 +6,7 @@ edition = "2018"
 # TODO: Keywords, readmes, stuff..
 
 [dependencies]
+arrayvec = "~0.4"
 bitflags = "~1"
 crossbeam-epoch = "~0.7"
 # TODO: Consider what to do with the union feature. Why is it still requiring nightly?

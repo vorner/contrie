@@ -6,6 +6,7 @@ use std::ops::Deref;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use arrayvec::ArrayVec;
 use bitflags::bitflags;
 use crossbeam_epoch::{Atomic, Guard, Owned, Shared};
 use smallvec::SmallVec;
@@ -23,6 +24,7 @@ use smallvec::SmallVec;
 const LEVEL_BITS: usize = 4;
 const LEVEL_MASK: u64 = 0b1111;
 const LEVEL_CELLS: usize = 16;
+const MAX_LEVELS: usize = mem::size_of::<u64>() * 8 / LEVEL_BITS;
 
 bitflags! {
     /// Flags that can be put onto a pointer pointing to a node, specifying some interesting
@@ -312,10 +314,10 @@ where
                 unsafe {
                     Self::prune(&pin, parent.expect("Condemned the root!"), node);
                 }
-                // TODO: Either us or someone else modified the tree on our path. In many cases we
+                // Either us or someone else modified the tree on our path. In many cases we
                 // could just continue here, but some cases are complex. For now, we just restart
                 // the whole traversal and try from the start, for simplicity. This should be rare
-                // anyway.
+                // anyway, so complicating the code further probably is not worth it.
                 shift = 0;
                 current = &self.root;
                 parent = None;
@@ -357,8 +359,6 @@ where
                 {
                     // We need to add another level. Note: there *still* might be a collision.
                     // Therefore, we just add the level and try again.
-                    // FIXME: Once we have deletion, this could be adding & removing forever and
-                    // we need to do it in one step.
                     let other_hash = self.hash(data[0].key());
                     let other_bits = (other_hash >> shift) & LEVEL_MASK;
                     let mut inner = Inner::default();
@@ -451,7 +451,8 @@ where
         let hash = self.hash(key);
         let pin = crossbeam_epoch::pin();
         let mut shift = 0;
-        loop {
+        let mut levels: ArrayVec<[_; MAX_LEVELS]> = ArrayVec::new();
+        let deleted = loop {
             let node = current.load(Ordering::Acquire, &pin);
             let replace = |with| {
                 let result = current
@@ -466,13 +467,30 @@ where
             };
             match unsafe { node.as_ref() }? {
                 Node::Inner(inner) => {
-                    // TODO: We want to put things onto stack here somehow so we can do cleanups
-                    // later on.
+                    levels.push((current, node));
                     let bits = (hash >> shift) & LEVEL_MASK;
                     shift += LEVEL_BITS;
                     current = &inner[bits as usize];
                 }
                 Node::Data(data) => {
+                    // While most of the time the pruning can be done *after* the fact, because we
+                    // don't change the pointers on the path, we *do* change it at the data level.
+                    // Therefore we have to cope with it being condemned. Doing the local cleanup
+                    // and retrying is good enough.
+                    let flags = NodeFlags::from_bits(node.tag()).expect("Invalid tag bits");
+                    if flags.contains(NodeFlags::CONDEMNED) {
+                        unsafe {
+                            Self::prune(&pin, &current, node);
+                        }
+                        // Retry by starting over from the top, for similar reasons to the one in
+                        // insert.
+                        levels.clear();
+                        shift = 0;
+                        current = &self.root;
+                        continue;
+                    }
+
+                    // Try deleting the thing.
                     let mut deleted = None;
                     let new = data
                         .iter()
@@ -486,17 +504,66 @@ where
                         })
                         .cloned()
                         .collect::<Data<_, _>>();
-                    let new = if new.is_empty() {
-                        Shared::null()
-                    } else {
-                        Owned::new(Node::Data(new)).into_shared(&pin)
-                    };
-                    if deleted.is_some() && !replace(new) {
-                        continue;
+
+                    if deleted.is_some() {
+                        let new = if new.is_empty() {
+                            Shared::null()
+                        } else {
+                            Owned::new(Node::Data(new)).into_shared(&pin)
+                        };
+                        if !replace(new) {
+                            continue;
+                        }
                     }
-                    return deleted;
+
+                    break deleted;
                 }
             }
+        };
+
+        // Go from the top and try to clean up.
+        if deleted.is_some() {
+            for (parent, child) in levels.into_iter().rev() {
+                let inner = match unsafe { child.as_ref() } {
+                    Some(Node::Inner(inner)) => inner,
+                    _ => unreachable!(),
+                };
+
+                // This is an optimisation ‒ replacing the thing is expensive, so we want to check
+                // first (which is cheaper).
+                let non_null = inner
+                    .iter()
+                    .filter(|ptr| !ptr.load(Ordering::Relaxed, &pin).is_null())
+                    .count();
+                if non_null > 1 {
+                    // No reason to go into the upper levels.
+                    break;
+                }
+
+                // OK, we think we could remove this node. Try doing so.
+                if let PruneResult::Copy = unsafe { Self::prune(&pin, parent, child) } {
+                    // Even though we tried to count how many pointers there are, someone must have
+                    // added some since. So there's no way we can prone anything higher up and we
+                    // give up.
+                    break;
+                }
+                // Else:
+                // Just continue with higher levels. Even if someone made the contraction for
+                // us, it should be safe to do so.
+            }
+        }
+
+        deleted
+    }
+
+    pub fn is_empty(&self) -> bool {
+        // This relies on proper branch pruning.
+        // We can use the unprotected here, because we are not actually interested in where the
+        // pointer points to. Therefore we can also use the Relaxed ordering.
+        unsafe {
+            self.root
+                .load(Ordering::Relaxed, &crossbeam_epoch::unprotected())
+                .is_null()
         }
     }
 
@@ -740,7 +807,9 @@ mod tests {
         assert_eq!("hello", *map.get(&42).unwrap().value());
         assert_eq!("hello", *map.remove(&42).unwrap().value());
         assert!(map.get(&42).is_none());
+        assert!(map.is_empty());
         assert!(map.remove(&42).is_none());
+        assert!(map.is_empty());
     }
 
     fn remove_many_inner<H: BuildHasher>(map: ConMap<usize, usize, H>, len: usize) {
@@ -752,6 +821,8 @@ mod tests {
             assert_eq!(i, *map.remove(&i).unwrap().value());
             assert!(map.get(&i).is_none());
         }
+
+        assert!(map.is_empty());
     }
 
     #[test]
@@ -766,39 +837,48 @@ mod tests {
 
     #[test]
     fn collision_remove_one_left() {
-        let pin = crossbeam_epoch::pin();
         let map = ConMap::with_hasher(NoHasher);
         map.insert(1, 1);
         map.insert(2, 2);
-        let find_data = || -> Option<_> {
+
+        fn find_data<'g>(
+            map: &ConMap<usize, usize, NoHasher>,
+            pin: &'g Guard,
+        ) -> Option<&'g Node<usize, usize>> {
             let mut cur = &map.root;
             // Relaxed ‒ we are the only thread around
             loop {
-                match unsafe { cur.load(Ordering::Relaxed, &pin).deref() } {
+                match unsafe { cur.load(Ordering::Relaxed, pin).deref() } {
                     Node::Inner(inner) => {
                         cur = inner
                             .iter()
-                            .find(|c| !c.load(Ordering::Relaxed, &pin).is_null())?;
+                            .find(|c| !c.load(Ordering::Relaxed, pin).is_null())?;
                     }
                     data => return Some(data),
                 }
             }
         };
 
-        match find_data().expect("Leaf missing") {
-            Node::Data(data) => assert_eq!(2, data.len()),
-            _ => panic!("Wrong kind of a leaf"),
+        {
+            let pin = crossbeam_epoch::pin();
+            match find_data(&map, &pin).expect("Leaf missing") {
+                Node::Data(data) => assert_eq!(2, data.len()),
+                _ => panic!("Wrong kind of a leaf"),
+            }
         }
 
         assert!(map.remove(&2).is_some());
 
-        match find_data().expect("Leaf missing") {
-            Node::Data(data) => assert_eq!(1, data.len()),
-            _ => panic!("Wrong kind of a leaf"),
+        {
+            let pin = crossbeam_epoch::pin();
+            match find_data(&map, &pin).expect("Leaf missing") {
+                Node::Data(data) => assert_eq!(1, data.len()),
+                _ => panic!("Wrong kind of a leaf"),
+            }
         }
 
         assert!(map.remove(&1).is_some());
 
-        assert!(find_data().is_none());
+        assert!(map.is_empty());
     }
 }

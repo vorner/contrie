@@ -54,11 +54,13 @@ where
                     let expected = map.remove(&key);
                     let found = trie.remove(&key);
                     prop_assert_eq!(expected.as_ref(), found.as_ref().map(|l| l.value()));
+                    prop_assert_eq!(map.is_empty(), trie.is_empty());
                 }
                 Insert(key, value) => {
                     let expected = map.insert(key.clone(), value.clone());
                     let found = trie.insert(key, value);
                     prop_assert_eq!(expected.as_ref(), found.as_ref().map(|l| l.value()));
+                    assert!(!map.is_empty());
                 }
             }
         }
