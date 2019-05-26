@@ -11,7 +11,13 @@ use crossbeam_epoch::{Atomic, Guard, Owned, Shared};
 use smallvec::SmallVec;
 
 // TODO: Rename Leaf. It's a public name and a bit silly/leaks implementation details.
-// TODO: Make this whole type private and implement better/all APIs around it?
+// TODO: Make this whole type private and implement better/all APIs around it? Maybe make it
+// customizable even more ‒ synchronization, keys other than hashes (arbitrary byte strings?),
+// copy/clone directly instead of storing just the key. But certainly different things for sets (we
+// want the whole API to be Arc<K>, not Arc<Node>).
+// TODO: Iterators (from, into, extend)
+// TODO: Rayon support (from and into parallel iterator, extend) under a feature flag.
+// TODO: Distinguish between the leaf and inner node by tag on the pointer.
 
 // All directly written, some things are not const fn yet :-(. But tested below.
 const LEVEL_BITS: usize = 4;
