@@ -300,8 +300,11 @@ where
             }
         };
 
-        // FIXME: This is probably reachable from remove, right?
-        assert_eq!(0, child.tag(), "Attempt to replace condemned pointer");
+        assert_eq!(
+            0,
+            child.tag(),
+            "Attempt to replace condemned pointer or prune data node"
+        );
         // Orderings: We need to publish the new node. We don't need to acquire the previous value
         // to destroy, because we already have it in case of success and we don't care about it on
         // failure.
@@ -369,7 +372,8 @@ where
                 // TODO: In some cases we would not really *have* to do this (in particular, if we
                 // just want to walk through and not modify it here at all, it's OK).
                 unsafe {
-                    Self::prune(&pin, parent.expect("Condemned the root!"), node);
+                    let (parent, child) = parent.expect("Condemned the root!");
+                    Self::prune(&pin, parent, child);
                 }
                 // Either us or someone else modified the tree on our path. In many cases we
                 // could just continue here, but some cases are complex. For now, we just restart
@@ -435,7 +439,7 @@ where
                 let inner = unsafe { node.as_ref().expect("We just checked this is not NULL") };
                 let bits = (hash >> shift) & LEVEL_MASK;
                 shift += LEVEL_BITS;
-                parent = Some(current);
+                parent = Some((current, node));
                 current = &inner.0[bits as usize];
             }
         }
@@ -530,14 +534,14 @@ where
                 return None;
             } else if flags.contains(NodeFlags::CONDEMNED) {
                 unsafe {
-                    Self::prune(&pin, &current, node);
+                    let (current, node) = levels.pop().expect("Condemned the root");
+                    Self::prune(&pin, current, node);
                 }
                 // Retry by starting over from the top, for similar reasons to the one in
                 // insert.
                 levels.clear();
                 shift = 0;
                 current = &self.root;
-                continue;
             } else if flags.contains(NodeFlags::DATA) {
                 let data: &Data<K, V> = unsafe { load_data(node) };
                 // Try deleting the thing.
@@ -935,3 +939,4 @@ mod tests {
 }
 
 // TODO: Tests for correct dropping of values. And maybe add some canary values during tests?
+// TODO: Tests for when some action finds a condemned pointer somewhere
