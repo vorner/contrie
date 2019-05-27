@@ -333,18 +333,33 @@ where
             let node = current.load(Ordering::Acquire, &pin);
             let flags = nf(node);
 
-            let replace = |with, delete_previous| {
+            let replace = |with: Owned<Inner>, delete_previous| {
                 // If we fail to set it, the `with` is dropped together with the Err case, freeing
                 // whatever was inside it.
-                let result = current
-                    .compare_and_set_weak(node, with, Ordering::Release, &pin)
-                    .is_ok();
-                if result && !node.is_null() && delete_previous {
-                    assert!(flags.contains(NodeFlags::DATA));
-                    let node = Shared::from(node.as_raw() as usize as *const Data<K, V>);
-                    unsafe { pin.defer_destroy(node) };
+                let result = current.compare_and_set_weak(node, with, Ordering::Release, &pin);
+                match result {
+                    Ok(_) if !node.is_null() && delete_previous => {
+                        assert!(flags.contains(NodeFlags::DATA));
+                        let node = Shared::from(node.as_raw() as usize as *const Data<K, V>);
+                        unsafe { pin.defer_destroy(node) };
+                        true
+                    }
+                    Ok(_) => true,
+                    Err(e) => {
+                        if NodeFlags::from_bits(e.new.tag())
+                            .expect("Invalid flags")
+                            .contains(NodeFlags::DATA)
+                        {
+                            unsafe {
+                                drop(Owned::from_raw(
+                                    Box::into_raw(e.new.into_box()) as usize as *mut Data<K, V>
+                                ));
+                            }
+                        }
+                        // Else → just let e drop and destroy the owned in there
+                        false
+                    }
                 }
-                result
             };
 
             if flags.contains(NodeFlags::CONDEMNED) {
@@ -490,18 +505,26 @@ where
         let deleted = loop {
             let node = current.load(Ordering::Acquire, &pin);
             let flags = nf(node);
-            let replace = |with| {
-                let result = current
-                    .compare_and_set_weak(node, with, Ordering::Release, &pin)
-                    .is_ok();
-                if result {
-                    assert!(flags.contains(NodeFlags::DATA));
-                    unsafe {
-                        let node = Shared::from(node.as_raw() as usize as *const Data<K, V>);
-                        pin.defer_destroy(node);
+            let replace = |with: Shared<_>| {
+                let result = current.compare_and_set_weak(node, with, Ordering::Release, &pin);
+                match result {
+                    Ok(_) => {
+                        assert!(flags.contains(NodeFlags::DATA));
+                        unsafe {
+                            let node = Shared::from(node.as_raw() as usize as *const Data<K, V>);
+                            pin.defer_destroy(node);
+                        }
+                        true
                     }
+                    Err(ref e) if !e.new.is_null() => {
+                        assert!(nf(e.new).contains(NodeFlags::DATA));
+                        unsafe {
+                            drop(Owned::from_raw(e.new.as_raw() as usize as *mut Data<K, V>));
+                        }
+                        false
+                    }
+                    Err(_) => false,
                 }
-                result
             };
 
             if node.is_null() {
