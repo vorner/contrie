@@ -302,7 +302,7 @@ where
         // to destroy, because we already have it in case of success and we don't care about it on
         // failure.
         let result = parent
-            .compare_and_set_weak(child, insert, (Ordering::Release, Ordering::Relaxed), pin)
+            .compare_and_set(child, insert, (Ordering::Release, Ordering::Relaxed), pin)
             .is_ok();
         if result {
             // We successfully unlinked the old child, so it's time to destroy it (as soon as
