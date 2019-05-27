@@ -19,9 +19,9 @@ use smallvec::SmallVec;
 // want the whole API to be Arc<K>, not Arc<Node>).
 // TODO: Iterators (from, into, extend)
 // TODO: Rayon support (from and into parallel iterator, extend) under a feature flag.
-// TODO: Distinguish between the leaf and inner node by tag on the pointer.
 // TODO: Valgrind into the CI
-// FIXME: We seem to be leaking somewhere. Where?!
+// TODO: Split into multiple files
+// TODO: Some refactoring around the pointer juggling. This seems to be error prone.
 
 // All directly written, some things are not const fn yet :-(. But tested below.
 const LEVEL_BITS: usize = 4;
@@ -68,6 +68,10 @@ fn owned_data<K, V>(data: Data<K, V>) -> Owned<Inner> {
         Owned::<Inner>::from_raw(Box::into_raw(Box::new(data)) as usize as *mut _)
             .with_tag(NodeFlags::DATA.bits())
     }
+}
+
+unsafe fn drop_data<K, V>(ptr: Shared<Inner>) {
+    drop(Owned::from_raw(ptr.as_raw() as usize as *mut Data<K, V>));
 }
 
 #[derive(Default)]
@@ -350,11 +354,7 @@ where
                             .expect("Invalid flags")
                             .contains(NodeFlags::DATA)
                         {
-                            unsafe {
-                                drop(Owned::from_raw(
-                                    Box::into_raw(e.new.into_box()) as usize as *mut Data<K, V>
-                                ));
-                            }
+                            unsafe { drop_data::<K, V>(e.new.into_shared(&pin)) };
                         }
                         // Else → just let e drop and destroy the owned in there
                         false
@@ -518,9 +518,7 @@ where
                     }
                     Err(ref e) if !e.new.is_null() => {
                         assert!(nf(e.new).contains(NodeFlags::DATA));
-                        unsafe {
-                            drop(Owned::from_raw(e.new.as_raw() as usize as *mut Data<K, V>));
-                        }
+                        unsafe { drop_data::<K, V>(e.new) };
                         false
                     }
                     Err(_) => false,
@@ -655,8 +653,7 @@ impl<K, V, S> Drop for ConMap<K, V, S> {
             if extract.is_null() {
                 // Skip
             } else if flags.contains(NodeFlags::DATA) {
-                let ptr = Owned::from_raw(extract.as_raw() as usize as *mut Data<K, V>);
-                drop(ptr);
+                drop_data::<K, V>(extract);
             } else {
                 let owned = extract.into_owned();
                 for sub in &owned.0 {
