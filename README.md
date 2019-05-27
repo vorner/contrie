@@ -1,11 +1,12 @@
-# ArcSwap
+# ConTrie
 
 [![Travis Build Status](https://api.travis-ci.org/vorner/contrie.png?branch=master)](https://travis-ci.org/vorner/contrie)
 [![AppVeyor Build status](https://ci.appveyor.com/api/projects/status/9e0mmfqqp4o9ap5c/branch/master?svg=true)](https://ci.appveyor.com/project/vorner/contrie/branch/master)
 
 A concurrent hash-trie map & set.
 
-Very alpha state right now, more an experiment than anything finished.
+Very alpha state right now, more an experiment than anything finished. And it
+even might need a better name.
 
 Read [the documentation](https://docs.rs/contrie) before using.
 
