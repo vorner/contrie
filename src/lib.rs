@@ -1,6 +1,7 @@
 use std::borrow::Borrow;
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hash, Hasher};
+use std::marker::PhantomData;
 use std::mem;
 use std::ops::Deref;
 use std::sync::atomic::Ordering;
@@ -18,7 +19,9 @@ use smallvec::SmallVec;
 // want the whole API to be Arc<K>, not Arc<Node>).
 // TODO: Iterators (from, into, extend)
 // TODO: Rayon support (from and into parallel iterator, extend) under a feature flag.
-// TODO: Distinguish between the leaf and inner node by tag on the pointer.
+// TODO: Valgrind into the CI
+// TODO: Split into multiple files
+// TODO: Some refactoring around the pointer juggling. This seems to be error prone.
 
 // All directly written, some things are not const fn yet :-(. But tested below.
 const LEVEL_BITS: usize = 4;
@@ -26,6 +29,7 @@ const LEVEL_MASK: u64 = 0b1111;
 const LEVEL_CELLS: usize = 16;
 const MAX_LEVELS: usize = mem::size_of::<u64>() * 8 / LEVEL_BITS;
 
+// TODO: Checks that we really do have the bits in the alignment.
 bitflags! {
     /// Flags that can be put onto a pointer pointing to a node, specifying some interesting
     /// things.
@@ -37,11 +41,41 @@ bitflags! {
         ///
         /// Changing this pointer is pointer is forbidden, and the containing Inner needs to be
         /// replaced first with a clean one.
-        const CONDEMNED = 0b1;
+        const CONDEMNED = 0b01;
+        /// The pointer points not to an inner node, but to data node.
+        ///
+        /// TODO: Describe the trick better.
+        const DATA = 0b10;
     }
 }
 
-type Inner<K, V> = [Atomic<Node<K, V>>; LEVEL_CELLS];
+fn nf(node: Shared<Inner>) -> NodeFlags {
+    NodeFlags::from_bits(node.tag()).expect("Invalid node flags")
+}
+
+unsafe fn load_data<'a, K: 'a, V: 'a>(node: Shared<'a, Inner>) -> &'a Data<K, V> {
+    assert!(
+        nf(node).contains(NodeFlags::DATA),
+        "Tried to load data from inner node pointer"
+    );
+    (node.as_raw() as usize as *const Data<K, V>)
+        .as_ref()
+        .expect("A null pointer with data flag found")
+}
+
+fn owned_data<K, V>(data: Data<K, V>) -> Owned<Inner> {
+    unsafe {
+        Owned::<Inner>::from_raw(Box::into_raw(Box::new(data)) as usize as *mut _)
+            .with_tag(NodeFlags::DATA.bits())
+    }
+}
+
+unsafe fn drop_data<K, V>(ptr: Shared<Inner>) {
+    drop(Owned::from_raw(ptr.as_raw() as usize as *mut Data<K, V>));
+}
+
+#[derive(Default)]
+struct Inner([Atomic<Inner>; LEVEL_CELLS]);
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct Leaf<K, V> {
@@ -77,12 +111,9 @@ impl<K, V> Deref for Leaf<K, V> {
 // words in addition to the length (pointer and capacity), we have room for 2 Arcs in the not
 // spilled case too, so we as well might take advantage of it.
 // TODO: We want the union feature.
+//
+// Alternatively, we probably could use the raw allocator API and structure with len + [Arc<..>; 0].
 type Data<K, V> = SmallVec<[Arc<Leaf<K, V>>; 2]>;
-
-enum Node<K, V> {
-    Inner(Inner<K, V>),
-    Data(Data<K, V>),
-}
 
 enum TraverseState<K, V, F> {
     Empty, // Invalid temporary state.
@@ -112,10 +143,10 @@ impl<K, V, F: FnOnce() -> V> TraverseState<K, V, F> {
         *self = new_val;
         result
     }
-    fn data_owned(&mut self) -> Owned<Node<K, V>> {
+    fn data_owned(&mut self) -> Owned<Inner> {
         let mut data = Data::new();
         data.push(self.leaf());
-        Owned::new(Node::Data(data))
+        owned_data(data)
     }
     fn into_leaf(self) -> Arc<Leaf<K, V>> {
         match self {
@@ -153,7 +184,8 @@ enum PruneResult {
 
 pub struct ConMap<K, V, S = RandomState> {
     hash_builder: S,
-    root: Atomic<Node<K, V>>,
+    root: Atomic<Inner>,
+    _data: PhantomData<Leaf<K, V>>,
 }
 
 impl<K: Eq + Hash, V> ConMap<K, V, RandomState> {
@@ -171,6 +203,7 @@ where
         Self {
             hash_builder,
             root: Atomic::null(),
+            _data: PhantomData,
         }
     }
 
@@ -206,15 +239,12 @@ where
     /// * A copy of child.
     ///
     /// Returns how the pruning went.
-    unsafe fn prune(
-        pin: &Guard,
-        parent: &Atomic<Node<K, V>>,
-        child: Shared<Node<K, V>>,
-    ) -> PruneResult {
-        let inner = match child.as_ref() {
-            Some(Node::Inner(inner)) => inner,
-            _ => unreachable!("Invalid child node passed to prune"),
-        };
+    unsafe fn prune(pin: &Guard, parent: &Atomic<Inner>, child: Shared<Inner>) -> PruneResult {
+        assert!(
+            !nf(child).contains(NodeFlags::DATA),
+            "Child passed to prune must not be data"
+        );
+        let inner = child.as_ref().expect("Null child node passed to prune");
         let mut allow_contract = true;
         let mut child_cnt = 0;
         let mut last_leaf = None;
@@ -223,27 +253,27 @@ where
         // 1. Mark all the cells in this one as condemned.
         // 2. Look how many non-null branches are leading from there.
         // 3. Construct a copy of the child *without* the tags on the way.
-        for (new, grandchild) in new_child.iter_mut().zip(inner) {
+        for (new, grandchild) in new_child.0.iter_mut().zip(&inner.0) {
             // Acquire ‒ we don't need the grandchild ourselves, only the pointer. But we'll need
             // to "republish" it through the parent pointer later on and for that we have to get it
             // first.
             //
-            // FIXME: Do we actually need SeqCst here to order it relative to the CAS below?
-            let gc = grandchild
-                .fetch_or(NodeFlags::CONDEMNED.bits(), Ordering::Acquire, pin)
-                .with_tag(0);
-            match gc.as_ref() {
-                Some(Node::Data(_)) => {
-                    last_leaf.replace(gc);
-                    child_cnt += 1;
-                }
+            // FIXME: May we actually need SeqCst here to order it relative to the CAS below?
+            let gc = grandchild.fetch_or(NodeFlags::CONDEMNED.bits(), Ordering::Acquire, pin);
+            // The flags we insert into the new one should not contain condemned flag even if it
+            // was already present here.
+            let flags = nf(gc) & !NodeFlags::CONDEMNED;
+            let gc = gc.with_tag(flags.bits());
+            if gc.is_null() {
+                // Do nothing, just skip
+            } else if flags.contains(NodeFlags::DATA) {
+                last_leaf.replace(gc);
+                child_cnt += 1;
+            } else {
                 // If we have an inner node here, multiple leaves hang somewhere below there. More
                 // importantly, we can't contrack the edge.
-                Some(Node::Inner(_)) => {
-                    allow_contract = false;
-                    child_cnt += 1;
-                }
-                None => (),
+                allow_contract = false;
+                child_cnt += 1;
             }
 
             *new = Atomic::from(gc);
@@ -261,7 +291,7 @@ where
             // Many nodes (maybe somewhere below) ‒ someone must have inserted in between. But
             // we've already condemned this node, so create a new one and do the replacement.
             _ => {
-                let new = Owned::new(Node::Inner(new_child)).into_shared(pin);
+                let new = Owned::new(new_child).into_shared(pin);
                 // Note: we don't store Owned, because we may link it in. If we panicked before
                 // disarming it, it would delete something linked in, which is bad. Instead, we
                 // prefer deleting manually after the fact.
@@ -270,12 +300,13 @@ where
             }
         };
 
+        // FIXME: This is probably reachable from remove, right?
         assert_eq!(0, child.tag(), "Attempt to replace condemned pointer");
         // Orderings: We need to publish the new node. We don't need to acquire the previous value
         // to destroy, because we already have it in case of success and we don't care about it on
         // failure.
         let result = parent
-            .compare_and_set_weak(child, insert, (Ordering::Release, Ordering::Relaxed), pin)
+            .compare_and_set(child, insert, (Ordering::Release, Ordering::Relaxed), pin)
             .is_ok();
         if result {
             // We successfully unlinked the old child, so it's time to destroy it (as soon as
@@ -304,7 +335,33 @@ where
         let pin = crossbeam_epoch::pin();
         loop {
             let node = current.load(Ordering::Acquire, &pin);
-            let flags = NodeFlags::from_bits(node.tag()).expect("Invalid bit in pointer tag set");
+            let flags = nf(node);
+
+            let replace = |with: Owned<Inner>, delete_previous| {
+                // If we fail to set it, the `with` is dropped together with the Err case, freeing
+                // whatever was inside it.
+                let result = current.compare_and_set_weak(node, with, Ordering::Release, &pin);
+                match result {
+                    Ok(_) if !node.is_null() && delete_previous => {
+                        assert!(flags.contains(NodeFlags::DATA));
+                        let node = Shared::from(node.as_raw() as usize as *const Data<K, V>);
+                        unsafe { pin.defer_destroy(node) };
+                        true
+                    }
+                    Ok(_) => true,
+                    Err(e) => {
+                        if NodeFlags::from_bits(e.new.tag())
+                            .expect("Invalid flags")
+                            .contains(NodeFlags::DATA)
+                        {
+                            unsafe { drop_data::<K, V>(e.new.into_shared(&pin)) };
+                        }
+                        // Else → just let e drop and destroy the owned in there
+                        false
+                    }
+                }
+            };
+
             if flags.contains(NodeFlags::CONDEMNED) {
                 // This one is going away. We are not allowed to modify the cell, we just have to
                 // replace the inner node first. So, let's do some cleanup.
@@ -321,60 +378,40 @@ where
                 shift = 0;
                 current = &self.root;
                 parent = None;
-                continue;
-            }
-            let replace = |with, delete_previous| {
-                // If we fail to set it, the `with` is dropped together with the Err case, freeing
-                // whatever was inside it.
-                let result = current
-                    .compare_and_set_weak(node, with, Ordering::Release, &pin)
-                    .is_ok();
-                if result && !node.is_null() && delete_previous {
-                    unsafe { pin.defer_destroy(node) };
-                }
-                result
-            };
-            match unsafe { node.as_ref() } {
-                Some(Node::Inner(inner)) => {
-                    let bits = (hash >> shift) & LEVEL_MASK;
-                    shift += LEVEL_BITS;
-                    parent = Some(current);
-                    current = &inner[bits as usize];
-                }
+            } else if node.is_null() {
                 // Not found, create it.
-                None => {
-                    if replace(state.data_owned(), true) {
-                        return state.into_return(mode);
-                        // else -> retry
-                    }
+                if replace(state.data_owned(), true) {
+                    return state.into_return(mode);
                 }
-                // There's one data node at this pointer, but we want to place a different one here
-                // too. So we create a new level, push the old one down. Note that we check both
-                // that we are adding something else & that we still have some more bits to
-                // distinguish by.
-                Some(Node::Data(data))
-                    if data.len() == 1
-                        && data[0].key() != state.key()
-                        && shift < mem::size_of_val(&hash) * 8 =>
+            // else -> retry
+            } else if flags.contains(NodeFlags::DATA) {
+                let data: &Data<K, V> = unsafe { load_data(node) };
+                if data.len() == 1
+                    && data[0].key() != state.key()
+                    && shift < mem::size_of_val(&hash) * 8
                 {
+                    // There's one data node at this pointer, but we want to place a different one
+                    // here too. So we create a new level, push the old one down. Note that we
+                    // check both that we are adding something else & that we still have some more
+                    // bits to distinguish by.
+
                     // We need to add another level. Note: there *still* might be a collision.
                     // Therefore, we just add the level and try again.
                     let other_hash = self.hash(data[0].key());
                     let other_bits = (other_hash >> shift) & LEVEL_MASK;
                     let mut inner = Inner::default();
-                    inner[other_bits as usize] = Atomic::from(node);
-                    let split = Owned::new(Node::Inner(inner));
+                    inner.0[other_bits as usize] = Atomic::from(node);
+                    let split = Owned::new(inner);
                     // No matter if it succeeds or fails, we try again. We'll either find the newly
                     // inserted value here and continue with another level down, or it gets
                     // destroyed and we try splitting again.
                     replace(split, false);
-                }
-                // All the other cases:
-                // * It has the same key
-                // * There's already a collision on this level (because we've already run out of
-                //   bits previously).
-                // * We've run out of the hash bits so there's nothing to split by any more.
-                Some(Node::Data(data)) => {
+                } else {
+                    // All the other cases:
+                    // * It has the same key
+                    // * There's already a collision on this level (because we've already run out of
+                    //   bits previously).
+                    // * We've run out of the hash bits so there's nothing to split by any more.
                     let old = data
                         .iter()
                         .find(|l| l.key().borrow() == state.key())
@@ -385,7 +422,7 @@ where
                         new.extend(data.iter().filter(|l| l.key() != state.key()).cloned());
                         new.push(state.leaf());
                         new.shrink_to_fit();
-                        let new = Owned::new(Node::Data(new));
+                        let new = owned_data(new);
                         if !replace(new, true) {
                             continue;
                         }
@@ -393,6 +430,13 @@ where
 
                     return old.or_else(|| state.into_return(mode));
                 }
+            } else {
+                // An inner node, go one level deeper.
+                let inner = unsafe { node.as_ref().expect("We just checked this is not NULL") };
+                let bits = (hash >> shift) & LEVEL_MASK;
+                shift += LEVEL_BITS;
+                parent = Some(current);
+                current = &inner.0[bits as usize];
             }
         }
     }
@@ -407,13 +451,19 @@ where
         let pin = crossbeam_epoch::pin();
         loop {
             let node = current.load(Ordering::Acquire, &pin);
-            match unsafe { node.as_ref() }? {
-                Node::Inner(inner) => {
-                    let bits = hash & LEVEL_MASK;
-                    hash >>= LEVEL_BITS;
-                    current = &inner[bits as usize];
-                }
-                Node::Data(data) => return data.iter().find(|l| l.key().borrow() == key).cloned(),
+            let flags = nf(node);
+            if node.is_null() {
+                return None;
+            } else if flags.contains(NodeFlags::DATA) {
+                return unsafe { load_data::<K, V>(node) }
+                    .iter()
+                    .find(|l| l.key().borrow() == key)
+                    .cloned();
+            } else {
+                let inner = unsafe { node.as_ref().expect("We just checked this is not NULL") };
+                let bits = hash & LEVEL_MASK;
+                hash >>= LEVEL_BITS;
+                current = &inner.0[bits as usize];
             }
         }
     }
@@ -454,84 +504,87 @@ where
         let mut levels: ArrayVec<[_; MAX_LEVELS]> = ArrayVec::new();
         let deleted = loop {
             let node = current.load(Ordering::Acquire, &pin);
-            let replace = |with| {
-                let result = current
-                    .compare_and_set_weak(node, with, Ordering::Release, &pin)
-                    .is_ok();
-                if result {
-                    unsafe {
-                        pin.defer_destroy(node);
-                    }
-                }
-                result
-            };
-            match unsafe { node.as_ref() }? {
-                Node::Inner(inner) => {
-                    levels.push((current, node));
-                    let bits = (hash >> shift) & LEVEL_MASK;
-                    shift += LEVEL_BITS;
-                    current = &inner[bits as usize];
-                }
-                Node::Data(data) => {
-                    // While most of the time the pruning can be done *after* the fact, because we
-                    // don't change the pointers on the path, we *do* change it at the data level.
-                    // Therefore we have to cope with it being condemned. Doing the local cleanup
-                    // and retrying is good enough.
-                    let flags = NodeFlags::from_bits(node.tag()).expect("Invalid tag bits");
-                    if flags.contains(NodeFlags::CONDEMNED) {
+            let flags = nf(node);
+            let replace = |with: Shared<_>| {
+                let result = current.compare_and_set_weak(node, with, Ordering::Release, &pin);
+                match result {
+                    Ok(_) => {
+                        assert!(flags.contains(NodeFlags::DATA));
                         unsafe {
-                            Self::prune(&pin, &current, node);
+                            let node = Shared::from(node.as_raw() as usize as *const Data<K, V>);
+                            pin.defer_destroy(node);
                         }
-                        // Retry by starting over from the top, for similar reasons to the one in
-                        // insert.
-                        levels.clear();
-                        shift = 0;
-                        current = &self.root;
+                        true
+                    }
+                    Err(ref e) if !e.new.is_null() => {
+                        assert!(nf(e.new).contains(NodeFlags::DATA));
+                        unsafe { drop_data::<K, V>(e.new) };
+                        false
+                    }
+                    Err(_) => false,
+                }
+            };
+
+            if node.is_null() {
+                // Nothing to delete, so just give up (without pruning).
+                return None;
+            } else if flags.contains(NodeFlags::CONDEMNED) {
+                unsafe {
+                    Self::prune(&pin, &current, node);
+                }
+                // Retry by starting over from the top, for similar reasons to the one in
+                // insert.
+                levels.clear();
+                shift = 0;
+                current = &self.root;
+                continue;
+            } else if flags.contains(NodeFlags::DATA) {
+                let data: &Data<K, V> = unsafe { load_data(node) };
+                // Try deleting the thing.
+                let mut deleted = None;
+                let new = data
+                    .iter()
+                    .filter(|l| {
+                        if l.key().borrow() == key {
+                            deleted = Some(Arc::clone(l));
+                            false
+                        } else {
+                            true
+                        }
+                    })
+                    .cloned()
+                    .collect::<Data<_, _>>();
+
+                if deleted.is_some() {
+                    let new = if new.is_empty() {
+                        Shared::null()
+                    } else {
+                        owned_data(new).into_shared(&pin)
+                    };
+                    if !replace(new) {
                         continue;
                     }
-
-                    // Try deleting the thing.
-                    let mut deleted = None;
-                    let new = data
-                        .iter()
-                        .filter(|l| {
-                            if l.key().borrow() == key {
-                                deleted = Some(Arc::clone(l));
-                                false
-                            } else {
-                                true
-                            }
-                        })
-                        .cloned()
-                        .collect::<Data<_, _>>();
-
-                    if deleted.is_some() {
-                        let new = if new.is_empty() {
-                            Shared::null()
-                        } else {
-                            Owned::new(Node::Data(new)).into_shared(&pin)
-                        };
-                        if !replace(new) {
-                            continue;
-                        }
-                    }
-
-                    break deleted;
                 }
+
+                break deleted;
+            } else {
+                let inner = unsafe { node.as_ref().expect("We just checked for NULL") };
+                levels.push((current, node));
+                let bits = (hash >> shift) & LEVEL_MASK;
+                shift += LEVEL_BITS;
+                current = &inner.0[bits as usize];
             }
         };
 
         // Go from the top and try to clean up.
         if deleted.is_some() {
             for (parent, child) in levels.into_iter().rev() {
-                let inner = match unsafe { child.as_ref() } {
-                    Some(Node::Inner(inner)) => inner,
-                    _ => unreachable!(),
-                };
+                let inner = unsafe { child.as_ref().expect("We just checked for NULL") };
 
                 // This is an optimisation ‒ replacing the thing is expensive, so we want to check
                 // first (which is cheaper).
                 let non_null = inner
+                    .0
                     .iter()
                     .filter(|ptr| !ptr.load(Ordering::Relaxed, &pin).is_null())
                     .count();
@@ -593,23 +646,23 @@ impl<K, V, S> Drop for ConMap<K, V, S> {
          *   have been synchronized into our thread already by this time.
          * * The pointer inside this data structure is never dangling.
          */
-        unsafe fn drop_recursive<K, V>(node: &Atomic<Node<K, V>>) {
+        unsafe fn drop_recursive<K, V>(node: &Atomic<Inner>) {
             let pin = crossbeam_epoch::unprotected();
             let extract = node.load(Ordering::Relaxed, &pin);
-            if !extract.is_null() {
-                let extract = extract.into_owned();
-                match extract.deref() {
-                    Node::Inner(inner) => {
-                        for sub in inner {
-                            drop_recursive(sub);
-                        }
-                    }
-                    Node::Data(_) => (),
+            let flags = nf(extract);
+            if extract.is_null() {
+                // Skip
+            } else if flags.contains(NodeFlags::DATA) {
+                drop_data::<K, V>(extract);
+            } else {
+                let owned = extract.into_owned();
+                for sub in &owned.0 {
+                    drop_recursive::<K, V>(sub);
                 }
-                drop(extract);
+                drop(owned);
             }
         }
-        unsafe { drop_recursive(&self.root) };
+        unsafe { drop_recursive::<K, V>(&self.root) };
     }
 }
 
@@ -844,37 +897,35 @@ mod tests {
         fn find_data<'g>(
             map: &ConMap<usize, usize, NoHasher>,
             pin: &'g Guard,
-        ) -> Option<&'g Node<usize, usize>> {
+        ) -> Option<&'g Data<usize, usize>> {
             let mut cur = &map.root;
             // Relaxed ‒ we are the only thread around
             loop {
-                match unsafe { cur.load(Ordering::Relaxed, pin).deref() } {
-                    Node::Inner(inner) => {
-                        cur = inner
-                            .iter()
-                            .find(|c| !c.load(Ordering::Relaxed, pin).is_null())?;
-                    }
-                    data => return Some(data),
+                let node = cur.load(Ordering::Relaxed, &pin);
+                assert!(!node.is_null());
+                let flags = nf(node);
+                if flags.contains(NodeFlags::DATA) {
+                    return Some(unsafe { load_data(node) });
+                } else {
+                    let inner = unsafe { node.deref() };
+                    cur = inner
+                        .0
+                        .iter()
+                        .find(|c| !c.load(Ordering::Relaxed, pin).is_null())?;
                 }
             }
         };
 
         {
             let pin = crossbeam_epoch::pin();
-            match find_data(&map, &pin).expect("Leaf missing") {
-                Node::Data(data) => assert_eq!(2, data.len()),
-                _ => panic!("Wrong kind of a leaf"),
-            }
+            assert_eq!(2, find_data(&map, &pin).expect("Leaf missing").len());
         }
 
         assert!(map.remove(&2).is_some());
 
         {
             let pin = crossbeam_epoch::pin();
-            match find_data(&map, &pin).expect("Leaf missing") {
-                Node::Data(data) => assert_eq!(1, data.len()),
-                _ => panic!("Wrong kind of a leaf"),
-            }
+            assert_eq!(1, find_data(&map, &pin).expect("Leaf missing").len());
         }
 
         assert!(map.remove(&1).is_some());
@@ -882,3 +933,5 @@ mod tests {
         assert!(map.is_empty());
     }
 }
+
+// TODO: Tests for correct dropping of values. And maybe add some canary values during tests?
