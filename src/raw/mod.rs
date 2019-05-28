@@ -12,6 +12,8 @@ use bitflags::bitflags;
 use crossbeam_epoch::{Atomic, Guard, Owned, Shared};
 use smallvec::SmallVec;
 
+pub mod config;
+
 // TODO: Rename Leaf. It's a public name and a bit silly/leaks implementation details.
 // TODO: Make this whole type private and implement better/all APIs around it? Maybe make it
 // customizable even more ‒ synchronization, keys other than hashes (arbitrary byte strings?),
