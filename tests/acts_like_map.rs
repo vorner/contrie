@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::hash::Hash;
 
-use contrie::ConMap;
+use contrie::raw::ConMap;
 use proptest::collection::vec;
 use proptest::prelude::*;
 use rayon::prelude::*;
