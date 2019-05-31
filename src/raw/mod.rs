@@ -1,11 +1,9 @@
 use std::borrow::Borrow;
-use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::marker::PhantomData;
 use std::mem;
 use std::ops::Deref;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 
 use arrayvec::ArrayVec;
 use bitflags::bitflags;
@@ -13,6 +11,8 @@ use crossbeam_epoch::{Atomic, Guard, Owned, Shared};
 use smallvec::SmallVec;
 
 pub mod config;
+
+use self::config::Config;
 
 // TODO: Rename Leaf. It's a public name and a bit silly/leaks implementation details.
 // TODO: Make this whole type private and implement better/all APIs around it? Maybe make it
@@ -26,10 +26,10 @@ pub mod config;
 // TODO: Some refactoring around the pointer juggling. This seems to be error prone.
 
 // All directly written, some things are not const fn yet :-(. But tested below.
-const LEVEL_BITS: usize = 4;
-const LEVEL_MASK: u64 = 0b1111;
-const LEVEL_CELLS: usize = 16;
-const MAX_LEVELS: usize = mem::size_of::<u64>() * 8 / LEVEL_BITS;
+pub(crate) const LEVEL_BITS: usize = 4;
+pub(crate) const LEVEL_MASK: u64 = 0b1111;
+pub(crate) const LEVEL_CELLS: usize = 16;
+pub(crate) const MAX_LEVELS: usize = mem::size_of::<u64>() * 8 / LEVEL_BITS;
 
 // TODO: Checks that we really do have the bits in the alignment.
 bitflags! {
@@ -55,25 +55,25 @@ fn nf(node: Shared<Inner>) -> NodeFlags {
     NodeFlags::from_bits(node.tag()).expect("Invalid node flags")
 }
 
-unsafe fn load_data<'a, K: 'a, V: 'a>(node: Shared<'a, Inner>) -> &'a Data<K, V> {
+unsafe fn load_data<'a, C: Config>(node: Shared<'a, Inner>) -> &'a Data<C> {
     assert!(
         nf(node).contains(NodeFlags::DATA),
         "Tried to load data from inner node pointer"
     );
-    (node.as_raw() as usize as *const Data<K, V>)
+    (node.as_raw() as usize as *const Data<C>)
         .as_ref()
         .expect("A null pointer with data flag found")
 }
 
-fn owned_data<K, V>(data: Data<K, V>) -> Owned<Inner> {
+fn owned_data<C: Config>(data: Data<C>) -> Owned<Inner> {
     unsafe {
         Owned::<Inner>::from_raw(Box::into_raw(Box::new(data)) as usize as *mut _)
             .with_tag(NodeFlags::DATA.bits())
     }
 }
 
-unsafe fn drop_data<K, V>(ptr: Shared<Inner>) {
-    drop(Owned::from_raw(ptr.as_raw() as usize as *mut Data<K, V>));
+unsafe fn drop_data<C: Config>(ptr: Shared<Inner>) {
+    drop(Owned::from_raw(ptr.as_raw() as usize as *mut Data<C>));
 }
 
 #[derive(Default)]
@@ -115,52 +115,52 @@ impl<K, V> Deref for Leaf<K, V> {
 // TODO: We want the union feature.
 //
 // Alternatively, we probably could use the raw allocator API and structure with len + [Arc<..>; 0].
-type Data<K, V> = SmallVec<[Arc<Leaf<K, V>>; 2]>;
+// TODO: Compute the stack length based on the Payload size.
+type Data<C> = SmallVec<[<C as Config>::Payload; 2]>;
 
-enum TraverseState<K, V, F> {
+enum TraverseState<C: Config, F> {
     Empty, // Invalid temporary state.
-    Created(Arc<Leaf<K, V>>),
-    Future { key: K, constructor: F },
+    Created(C::Payload),
+    Future { key: C::Key, constructor: F },
 }
 
-impl<K, V, F: FnOnce() -> V> TraverseState<K, V, F> {
-    fn key(&self) -> &K {
+impl<C: Config, F: FnOnce(C::Key) -> C::Payload> TraverseState<C, F> {
+    fn key(&self) -> &C::Key {
         match self {
             TraverseState::Empty => unreachable!("Not supposed to live in the empty state"),
-            TraverseState::Created(leaf) => leaf.key(),
+            TraverseState::Created(payload) => payload.borrow(),
             TraverseState::Future { key, .. } => key,
         }
     }
-    fn leaf(&mut self) -> Arc<Leaf<K, V>> {
+    fn payload(&mut self) -> C::Payload {
         let (new_val, result) = match mem::replace(self, TraverseState::Empty) {
             TraverseState::Empty => unreachable!("Not supposed to live in the empty state"),
-            TraverseState::Created(leaf) => (TraverseState::Created(Arc::clone(&leaf)), leaf),
+            TraverseState::Created(payload) => (TraverseState::Created(payload.clone()), payload),
             TraverseState::Future { key, constructor } => {
-                let value = constructor();
-                let leaf = Arc::new(Leaf::new(key, value));
-                let created = TraverseState::Created(Arc::clone(&leaf));
-                (created, leaf)
+                let payload = constructor(key);
+                let created = TraverseState::Created(payload.clone());
+                (created, payload)
             }
         };
         *self = new_val;
         result
     }
     fn data_owned(&mut self) -> Owned<Inner> {
-        let mut data = Data::new();
-        data.push(self.leaf());
-        owned_data(data)
+        let mut data = Data::<C>::new();
+        data.push(self.payload());
+        owned_data::<C>(data)
     }
-    fn into_leaf(self) -> Arc<Leaf<K, V>> {
+    fn into_payload(self) -> C::Payload {
         match self {
-            TraverseState::Created(leaf) => leaf,
-            TraverseState::Future { key, constructor } => Arc::new(Leaf::new(key, constructor())),
+            TraverseState::Created(payload) => payload,
+            TraverseState::Future { key, constructor } => constructor(key),
             TraverseState::Empty => unreachable!("Not supposed to live in the empty state"),
         }
     }
-    fn into_return(self, mode: TraverseMode) -> Option<Arc<Leaf<K, V>>> {
+    fn into_return(self, mode: TraverseMode) -> Option<C::Payload> {
         match mode {
             TraverseMode::Overwrite => None,
-            TraverseMode::IfMissing => Some(self.into_leaf()),
+            TraverseMode::IfMissing => Some(self.into_payload()),
         }
     }
 }
@@ -184,21 +184,15 @@ enum PruneResult {
     CasFail,
 }
 
-pub struct ConMap<K, V, S = RandomState> {
+pub struct Raw<C: Config, S> {
     hash_builder: S,
     root: Atomic<Inner>,
-    _data: PhantomData<Leaf<K, V>>,
+    _data: PhantomData<C::Payload>,
 }
 
-impl<K: Eq + Hash, V> ConMap<K, V, RandomState> {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
-impl<K, V, S> ConMap<K, V, S>
+impl<C, S> Raw<C, S>
 where
-    K: Eq + Hash,
+    C: Config,
     S: BuildHasher,
 {
     pub fn with_hasher(hash_builder: S) -> Self {
@@ -218,14 +212,10 @@ where
         hasher.finish()
     }
 
-    pub fn insert(&self, key: K, value: V) -> Option<Arc<Leaf<K, V>>> {
-        self.insert_leaf(Arc::new(Leaf::new(key, value)))
-    }
-
-    pub fn insert_leaf(&self, leaf: Arc<Leaf<K, V>>) -> Option<Arc<Leaf<K, V>>> {
+    pub fn insert(&self, payload: C::Payload) -> Option<C::Payload> {
         self.traverse(
             // Any way to do it without the type parameters here? Older rustc doesn't like them.
-            TraverseState::<K, V, fn() -> V>::Created(leaf),
+            TraverseState::<C, fn(C::Key) -> C::Payload>::Created(payload),
             TraverseMode::Overwrite,
         )
     }
@@ -325,13 +315,9 @@ where
         }
     }
 
-    fn traverse<F>(
-        &self,
-        mut state: TraverseState<K, V, F>,
-        mode: TraverseMode,
-    ) -> Option<Arc<Leaf<K, V>>>
+    fn traverse<F>(&self, mut state: TraverseState<C, F>, mode: TraverseMode) -> Option<C::Payload>
     where
-        F: FnOnce() -> V,
+        F: FnOnce(C::Key) -> C::Payload,
     {
         let hash = self.hash(state.key());
         let mut shift = 0;
@@ -349,7 +335,7 @@ where
                 match result {
                     Ok(_) if !node.is_null() && delete_previous => {
                         assert!(flags.contains(NodeFlags::DATA));
-                        let node = Shared::from(node.as_raw() as usize as *const Data<K, V>);
+                        let node = Shared::from(node.as_raw() as usize as *const Data<C>);
                         unsafe { pin.defer_destroy(node) };
                         true
                     }
@@ -359,7 +345,7 @@ where
                             .expect("Invalid flags")
                             .contains(NodeFlags::DATA)
                         {
-                            unsafe { drop_data::<K, V>(e.new.into_shared(&pin)) };
+                            unsafe { drop_data::<C>(e.new.into_shared(&pin)) };
                         }
                         // Else → just let e drop and destroy the owned in there
                         false
@@ -391,9 +377,9 @@ where
                 }
             // else -> retry
             } else if flags.contains(NodeFlags::DATA) {
-                let data: &Data<K, V> = unsafe { load_data(node) };
+                let data = unsafe { load_data::<C>(node) };
                 if data.len() == 1
-                    && data[0].key() != state.key()
+                    && data[0].borrow() != state.key()
                     && shift < mem::size_of_val(&hash) * 8
                 {
                     // There's one data node at this pointer, but we want to place a different one
@@ -403,7 +389,7 @@ where
 
                     // We need to add another level. Note: there *still* might be a collision.
                     // Therefore, we just add the level and try again.
-                    let other_hash = self.hash(data[0].key());
+                    let other_hash = self.hash(data[0].borrow());
                     let other_bits = (other_hash >> shift) & LEVEL_MASK;
                     let mut inner = Inner::default();
                     inner.0[other_bits as usize] = Atomic::from(node);
@@ -420,15 +406,19 @@ where
                     // * We've run out of the hash bits so there's nothing to split by any more.
                     let old = data
                         .iter()
-                        .find(|l| l.key().borrow() == state.key())
-                        .map(Arc::clone);
+                        .find(|l| (*l).borrow().borrow() == state.key())
+                        .cloned();
 
                     if old.is_none() || mode == TraverseMode::Overwrite {
-                        let mut new = Data::with_capacity(data.len() + 1);
-                        new.extend(data.iter().filter(|l| l.key() != state.key()).cloned());
-                        new.push(state.leaf());
+                        let mut new = Data::<C>::with_capacity(data.len() + 1);
+                        new.extend(
+                            data.iter()
+                                .filter(|l| (*l).borrow() != state.key())
+                                .cloned(),
+                        );
+                        new.push(state.payload());
                         new.shrink_to_fit();
-                        let new = owned_data(new);
+                        let new = owned_data::<C>(new);
                         if !replace(new, true) {
                             continue;
                         }
@@ -447,10 +437,10 @@ where
         }
     }
 
-    pub fn get<Q>(&self, key: &Q) -> Option<Arc<Leaf<K, V>>>
+    pub fn get<Q>(&self, key: &Q) -> Option<C::Payload>
     where
         Q: ?Sized + Eq + Hash,
-        K: Borrow<Q>,
+        C::Key: Borrow<Q>,
     {
         let mut current = &self.root;
         let mut hash = self.hash(key);
@@ -461,9 +451,9 @@ where
             if node.is_null() {
                 return None;
             } else if flags.contains(NodeFlags::DATA) {
-                return unsafe { load_data::<K, V>(node) }
+                return unsafe { load_data::<C>(node) }
                     .iter()
-                    .find(|l| l.key().borrow() == key)
+                    .find(|l| (*l).borrow().borrow() == key)
                     .cloned();
             } else {
                 let inner = unsafe { node.as_ref().expect("We just checked this is not NULL") };
@@ -474,9 +464,9 @@ where
         }
     }
 
-    pub fn get_or_insert_with<F>(&self, key: K, create: F) -> Arc<Leaf<K, V>>
+    pub fn get_or_insert_with<F>(&self, key: C::Key, create: F) -> C::Payload
     where
-        F: FnOnce() -> V,
+        F: FnOnce(C::Key) -> C::Payload,
     {
         let state = TraverseState::Future {
             key,
@@ -486,22 +476,10 @@ where
             .expect("Should have created one for me")
     }
 
-    // TODO: Return a tuple if it inserted a new one or found existing.
-    pub fn get_or_insert(&self, key: K, value: V) -> Arc<Leaf<K, V>> {
-        self.get_or_insert_with(key, || value)
-    }
-
-    pub fn get_or_insert_default(&self, key: K) -> Arc<Leaf<K, V>>
-    where
-        V: Default,
-    {
-        self.get_or_insert_with(key, V::default)
-    }
-
-    pub fn remove<Q>(&self, key: &Q) -> Option<Arc<Leaf<K, V>>>
+    pub fn remove<Q>(&self, key: &Q) -> Option<C::Payload>
     where
         Q: ?Sized + Eq + Hash,
-        K: Borrow<Q>,
+        C::Key: Borrow<Q>,
     {
         let mut current = &self.root;
         let hash = self.hash(key);
@@ -517,14 +495,14 @@ where
                     Ok(_) => {
                         assert!(flags.contains(NodeFlags::DATA));
                         unsafe {
-                            let node = Shared::from(node.as_raw() as usize as *const Data<K, V>);
+                            let node = Shared::from(node.as_raw() as usize as *const Data<C>);
                             pin.defer_destroy(node);
                         }
                         true
                     }
                     Err(ref e) if !e.new.is_null() => {
                         assert!(nf(e.new).contains(NodeFlags::DATA));
-                        unsafe { drop_data::<K, V>(e.new) };
+                        unsafe { drop_data::<C>(e.new) };
                         false
                     }
                     Err(_) => false,
@@ -545,27 +523,27 @@ where
                 shift = 0;
                 current = &self.root;
             } else if flags.contains(NodeFlags::DATA) {
-                let data: &Data<K, V> = unsafe { load_data(node) };
+                let data = unsafe { load_data::<C>(node) };
                 // Try deleting the thing.
                 let mut deleted = None;
                 let new = data
                     .iter()
                     .filter(|l| {
-                        if l.key().borrow() == key {
-                            deleted = Some(Arc::clone(l));
+                        if (*l).borrow().borrow() == key {
+                            deleted = Some((*l).clone());
                             false
                         } else {
                             true
                         }
                     })
                     .cloned()
-                    .collect::<Data<_, _>>();
+                    .collect::<Data<C>>();
 
                 if deleted.is_some() {
                     let new = if new.is_empty() {
                         Shared::null()
                     } else {
-                        owned_data(new).into_shared(&pin)
+                        owned_data::<C>(new).into_shared(&pin)
                     };
                     if !replace(new) {
                         continue;
@@ -629,18 +607,7 @@ where
     // TODO: Iteration & friends
 }
 
-// Implementing manually, derive would ask for K, V: Default
-impl<K, V, S> Default for ConMap<K, V, S>
-where
-    K: Eq + Hash,
-    S: BuildHasher + Default,
-{
-    fn default() -> Self {
-        Self::with_hasher(S::default())
-    }
-}
-
-impl<K, V, S> Drop for ConMap<K, V, S> {
+impl<C: Config, S> Drop for Raw<C, S> {
     fn drop(&mut self) {
         /*
          * Notes about unsafety here:
@@ -652,135 +619,34 @@ impl<K, V, S> Drop for ConMap<K, V, S> {
          *   have been synchronized into our thread already by this time.
          * * The pointer inside this data structure is never dangling.
          */
-        unsafe fn drop_recursive<K, V>(node: &Atomic<Inner>) {
+        unsafe fn drop_recursive<C: Config>(node: &Atomic<Inner>) {
             let pin = crossbeam_epoch::unprotected();
             let extract = node.load(Ordering::Relaxed, &pin);
             let flags = nf(extract);
             if extract.is_null() {
                 // Skip
             } else if flags.contains(NodeFlags::DATA) {
-                drop_data::<K, V>(extract);
+                drop_data::<C>(extract);
             } else {
                 let owned = extract.into_owned();
                 for sub in &owned.0 {
-                    drop_recursive::<K, V>(sub);
+                    drop_recursive::<C>(sub);
                 }
                 drop(owned);
             }
         }
-        unsafe { drop_recursive::<K, V>(&self.root) };
+        unsafe { drop_recursive::<C>(&self.root) };
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    use super::super::ConMap;
     use super::*;
 
-    use crossbeam_utils::thread;
-
-    const TEST_THREADS: usize = 4;
-    const TEST_BATCH: usize = 10000;
-    const TEST_BATCH_SMALL: usize = 100;
-    const TEST_REP: usize = 20;
-
-    #[test]
-    fn consts_consistent() {
-        assert_eq!(LEVEL_BITS, LEVEL_MASK.count_ones() as usize);
-        assert_eq!(LEVEL_BITS, (!LEVEL_MASK).trailing_zeros() as usize);
-        assert_eq!(LEVEL_CELLS, 2usize.pow(LEVEL_BITS as u32));
-    }
-
-    #[test]
-    fn create_destroy() {
-        let map: ConMap<String, usize> = ConMap::new();
-        drop(map);
-    }
-
-    #[test]
-    fn lookup_empty() {
-        let map: ConMap<String, usize> = ConMap::new();
-        assert!(map.get("hello").is_none());
-    }
-
-    #[test]
-    fn insert_lookup() {
-        let map = ConMap::new();
-        assert!(map.insert("hello", "world").is_none());
-        assert!(map.get("world").is_none());
-        let found = map.get("hello").unwrap();
-        assert_eq!(Leaf::new("hello", "world"), *found);
-    }
-
-    #[test]
-    fn insert_overwrite_lookup() {
-        let map = ConMap::new();
-        assert!(map.insert("hello", "world").is_none());
-        let old = map.insert("hello", "universe").unwrap();
-        assert_eq!(Leaf::new("hello", "world"), *old);
-        let found = map.get("hello").unwrap();
-        assert_eq!(Leaf::new("hello", "universe"), *found);
-    }
-
-    // Insert a lot of things, to make sure we have multiple levels.
-    #[test]
-    fn insert_many() {
-        let map = ConMap::new();
-        for i in 0..TEST_BATCH * LEVEL_CELLS {
-            assert!(map.insert(i, i).is_none());
-        }
-
-        for i in 0..TEST_BATCH * LEVEL_CELLS {
-            assert_eq!(i, *map.get(&i).unwrap().value());
-        }
-    }
-
-    #[test]
-    fn par_insert_many() {
-        for _ in 0..TEST_REP {
-            let map: ConMap<usize, usize> = ConMap::new();
-            thread::scope(|s| {
-                for t in 0..TEST_THREADS {
-                    let map = &map;
-                    s.spawn(move |_| {
-                        for i in 0..TEST_BATCH {
-                            let num = t * TEST_BATCH + i;
-                            assert!(map.insert(num, num).is_none());
-                        }
-                    });
-                }
-            })
-            .unwrap();
-
-            for i in 0..TEST_BATCH * TEST_THREADS {
-                assert_eq!(*map.get(&i).unwrap().value(), i);
-            }
-        }
-    }
-
-    #[test]
-    fn par_get_many() {
-        for _ in 0..TEST_REP {
-            let map = ConMap::new();
-            for i in 0..TEST_BATCH * TEST_THREADS {
-                assert!(map.insert(i, i).is_none());
-            }
-            thread::scope(|s| {
-                for t in 0..TEST_THREADS {
-                    let map = &map;
-                    s.spawn(move |_| {
-                        for i in 0..TEST_BATCH {
-                            let num = t * TEST_BATCH + i;
-                            assert_eq!(*map.get(&num).unwrap().value(), num);
-                        }
-                    });
-                }
-            })
-            .unwrap();
-        }
-    }
-
     // A hasher to create collisions on purpose. Let's make the hash trie into a glorified array.
-    struct NoHasher;
+    // We allow tests in higher-level modules to reuse it for their tests.
+    pub(crate) struct NoHasher;
 
     impl Hasher for NoHasher {
         fn finish(&self) -> u64 {
@@ -799,146 +665,9 @@ mod tests {
     }
 
     #[test]
-    fn collisions() {
-        let map = ConMap::with_hasher(NoHasher);
-        // While their hash is the same under the hasher, they don't kick each other out.
-        for i in 0..TEST_BATCH_SMALL {
-            assert!(map.insert(i, i).is_none());
-        }
-        // And all are present.
-        for i in 0..TEST_BATCH_SMALL {
-            assert_eq!(i, *map.get(&i).unwrap().value());
-        }
-        // But reusing the key kicks the other one out.
-        for i in 0..TEST_BATCH_SMALL {
-            assert_eq!(i, *map.insert(i, i + 1).unwrap().value());
-            assert_eq!(i + 1, *map.get(&i).unwrap().value());
-        }
-    }
-
-    #[test]
-    fn get_or_insert_empty() {
-        let map = ConMap::new();
-        let val = map.get_or_insert("hello", 42);
-        assert_eq!(42, *val.value());
-        assert_eq!("hello", *val.key());
-    }
-
-    #[test]
-    fn get_or_insert_existing() {
-        let map = ConMap::new();
-        assert!(map.insert("hello", 42).is_none());
-        let val = map.get_or_insert("hello", 0);
-        // We still have the original
-        assert_eq!(42, *val.value());
-        assert_eq!("hello", *val.key());
-    }
-
-    fn get_or_insert_many_inner<H: BuildHasher>(map: ConMap<usize, usize, H>, len: usize) {
-        for i in 0..len {
-            let val = map.get_or_insert(i, i);
-            assert_eq!(i, *val.key());
-            assert_eq!(i, *val.value());
-        }
-
-        for i in 0..len {
-            let val = map.get_or_insert(i, 0);
-            assert_eq!(i, *val.key());
-            assert_eq!(i, *val.value());
-        }
-    }
-
-    #[test]
-    fn get_or_insert_many() {
-        get_or_insert_many_inner(ConMap::new(), TEST_BATCH);
-    }
-
-    #[test]
-    fn get_or_insert_collision() {
-        get_or_insert_many_inner(ConMap::with_hasher(NoHasher), TEST_BATCH_SMALL);
-    }
-
-    #[test]
-    fn simple_remove() {
-        let map = ConMap::new();
-        assert!(map.remove(&42).is_none());
-        assert!(map.insert(42, "hello").is_none());
-        assert_eq!("hello", *map.get(&42).unwrap().value());
-        assert_eq!("hello", *map.remove(&42).unwrap().value());
-        assert!(map.get(&42).is_none());
-        assert!(map.is_empty());
-        assert!(map.remove(&42).is_none());
-        assert!(map.is_empty());
-    }
-
-    fn remove_many_inner<H: BuildHasher>(map: ConMap<usize, usize, H>, len: usize) {
-        for i in 0..len {
-            assert!(map.insert(i, i).is_none());
-        }
-        for i in 0..len {
-            assert_eq!(i, *map.get(&i).unwrap().value());
-            assert_eq!(i, *map.remove(&i).unwrap().value());
-            assert!(map.get(&i).is_none());
-        }
-
-        assert!(map.is_empty());
-    }
-
-    #[test]
-    fn remove_many() {
-        remove_many_inner(ConMap::new(), TEST_BATCH);
-    }
-
-    #[test]
-    fn remove_many_collision() {
-        remove_many_inner(ConMap::with_hasher(NoHasher), TEST_BATCH_SMALL);
-    }
-
-    #[test]
-    fn collision_remove_one_left() {
-        let map = ConMap::with_hasher(NoHasher);
-        map.insert(1, 1);
-        map.insert(2, 2);
-
-        fn find_data<'g>(
-            map: &ConMap<usize, usize, NoHasher>,
-            pin: &'g Guard,
-        ) -> Option<&'g Data<usize, usize>> {
-            let mut cur = &map.root;
-            // Relaxed ‒ we are the only thread around
-            loop {
-                let node = cur.load(Ordering::Relaxed, &pin);
-                assert!(!node.is_null());
-                let flags = nf(node);
-                if flags.contains(NodeFlags::DATA) {
-                    return Some(unsafe { load_data(node) });
-                } else {
-                    let inner = unsafe { node.deref() };
-                    cur = inner
-                        .0
-                        .iter()
-                        .find(|c| !c.load(Ordering::Relaxed, pin).is_null())?;
-                }
-            }
-        };
-
-        {
-            let pin = crossbeam_epoch::pin();
-            assert_eq!(2, find_data(&map, &pin).expect("Leaf missing").len());
-        }
-
-        assert!(map.remove(&2).is_some());
-
-        {
-            let pin = crossbeam_epoch::pin();
-            assert_eq!(1, find_data(&map, &pin).expect("Leaf missing").len());
-        }
-
-        assert!(map.remove(&1).is_some());
-
-        assert!(map.is_empty());
+    fn consts_consistent() {
+        assert_eq!(LEVEL_BITS, LEVEL_MASK.count_ones() as usize);
+        assert_eq!(LEVEL_BITS, (!LEVEL_MASK).trailing_zeros() as usize);
+        assert_eq!(LEVEL_CELLS, 2usize.pow(LEVEL_BITS as u32));
     }
 }
-
-// TODO: Tests for correct dropping of values. And maybe add some canary values during tests?
-// TODO: Tests for when some action finds a condemned pointer somewhere
