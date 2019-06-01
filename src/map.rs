@@ -93,19 +93,27 @@ where
     }
 
     pub fn insert_node(&self, node: Arc<Node<K, V>>) -> Option<Arc<Node<K, V>>> {
-        self.raw.insert(MapPayload(node)).map(|p| p.0)
+        let pin = crossbeam_epoch::pin();
+        self.raw
+            .insert(MapPayload(node), &pin)
+            .map(|p| Arc::clone(&p.0))
     }
 
     pub fn get_or_insert_with<F>(&self, key: K, create: F) -> ExistingOrNew<Arc<Node<K, V>>>
     where
         F: FnOnce() -> V,
     {
+        let pin = crossbeam_epoch::pin();
         self.raw
-            .get_or_insert_with(key, |key| {
-                let value = create();
-                MapPayload(Arc::new(Node::new(key, value)))
-            })
-            .map(|payload| payload.0)
+            .get_or_insert_with(
+                key,
+                |key| {
+                    let value = create();
+                    MapPayload(Arc::new(Node::new(key, value)))
+                },
+                &pin,
+            )
+            .map(|payload| Arc::clone(&payload.0))
     }
 
     pub fn get_or_insert(&self, key: K, value: V) -> ExistingOrNew<Arc<Node<K, V>>> {
@@ -124,7 +132,8 @@ where
         Q: ?Sized + Eq + Hash,
         K: Borrow<Q>,
     {
-        self.raw.get(key).map(|r| r.0)
+        let pin = crossbeam_epoch::pin();
+        self.raw.get(key, &pin).map(|r| Arc::clone(&r.0))
     }
 
     pub fn remove<Q>(&self, key: &Q) -> Option<Arc<Node<K, V>>>
@@ -132,7 +141,8 @@ where
         Q: ?Sized + Eq + Hash,
         K: Borrow<Q>,
     {
-        self.raw.remove(key).map(|r| r.0)
+        let pin = crossbeam_epoch::pin();
+        self.raw.remove(key, &pin).map(|r| Arc::clone(&r.0))
     }
 
     pub fn is_empty(&self) -> bool {

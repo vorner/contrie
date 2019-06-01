@@ -140,19 +140,6 @@ impl<C: Config, F: FnOnce(C::Key) -> C::Payload> TraverseState<C, F> {
         data.push(self.payload());
         owned_data::<C>(data)
     }
-    fn into_payload(self) -> C::Payload {
-        match self {
-            TraverseState::Created(payload) => payload,
-            TraverseState::Future { key, constructor } => constructor(key),
-            TraverseState::Empty => unreachable!("Not supposed to live in the empty state"),
-        }
-    }
-    fn into_return(self, mode: TraverseMode) -> Option<C::Payload> {
-        match mode {
-            TraverseMode::Overwrite => None,
-            TraverseMode::IfMissing => Some(self.into_payload()),
-        }
-    }
 }
 
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -202,11 +189,20 @@ where
         hasher.finish()
     }
 
-    pub fn insert(&self, payload: C::Payload) -> Option<C::Payload> {
+    pub fn insert<'s, 'p, 'r>(
+        &'s self,
+        payload: C::Payload,
+        pin: &'p Guard,
+    ) -> Option<&'r C::Payload>
+    where
+        's: 'r,
+        'p: 'r,
+    {
         self.traverse(
             // Any way to do it without the type parameters here? Older rustc doesn't like them.
             TraverseState::<C, fn(C::Key) -> C::Payload>::Created(payload),
             TraverseMode::Overwrite,
+            pin,
         )
         // TODO: Should we sanity-check this is Existing because it returns the previous value?
         .map(ExistingOrNew::into_inner)
@@ -307,19 +303,21 @@ where
         }
     }
 
-    fn traverse<F>(
-        &self,
+    fn traverse<'s, 'p, 'r, F>(
+        &'s self,
         mut state: TraverseState<C, F>,
         mode: TraverseMode,
-    ) -> Option<ExistingOrNew<C::Payload>>
+        pin: &'p Guard,
+    ) -> Option<ExistingOrNew<&'r C::Payload>>
     where
+        's: 'r,
+        'p: 'r,
         F: FnOnce(C::Key) -> C::Payload,
     {
         let hash = self.hash(state.key());
         let mut shift = 0;
         let mut current = &self.root;
         let mut parent = None;
-        let pin = crossbeam_epoch::pin();
         loop {
             let node = current.load(Ordering::Acquire, &pin);
             let flags = nf(node);
@@ -327,15 +325,15 @@ where
             let replace = |with: Owned<Inner>, delete_previous| {
                 // If we fail to set it, the `with` is dropped together with the Err case, freeing
                 // whatever was inside it.
-                let result = current.compare_and_set_weak(node, with, Ordering::Release, &pin);
+                let result = current.compare_and_set_weak(node, with, Ordering::Release, pin);
                 match result {
-                    Ok(_) if !node.is_null() && delete_previous => {
+                    Ok(new) if !node.is_null() && delete_previous => {
                         assert!(flags.contains(NodeFlags::DATA));
                         let node = Shared::from(node.as_raw() as usize as *const Data<C>);
                         unsafe { pin.defer_destroy(node) };
-                        true
+                        Some(new)
                     }
-                    Ok(_) => true,
+                    Ok(new) => Some(new),
                     Err(e) => {
                         if NodeFlags::from_bits(e.new.tag())
                             .expect("Invalid flags")
@@ -344,7 +342,7 @@ where
                             unsafe { drop_data::<C>(e.new.into_shared(&pin)) };
                         }
                         // Else → just let e drop and destroy the owned in there
-                        false
+                        None
                     }
                 }
             };
@@ -368,8 +366,13 @@ where
                 parent = None;
             } else if node.is_null() {
                 // Not found, create it.
-                if replace(state.data_owned(), true) {
-                    return state.into_return(mode).map(ExistingOrNew::New);
+                if let Some(new) = replace(state.data_owned(), true) {
+                    if mode == TraverseMode::Overwrite {
+                        return None;
+                    } else {
+                        let new = unsafe { load_data::<C>(new) };
+                        return Some(ExistingOrNew::New(&new[0]));
+                    }
                 }
             // else -> retry
             } else if flags.contains(NodeFlags::DATA) {
@@ -399,12 +402,12 @@ where
                     // * There's already a collision on this level (because we've already run out of
                     //   bits previously).
                     // * We've run out of the hash bits so there's nothing to split by any more.
-                    let old = data
+                    let mut result = data
                         .iter()
                         .find(|l| (*l).borrow().borrow() == state.key())
-                        .cloned();
+                        .map(ExistingOrNew::Existing);
 
-                    if old.is_none() || mode == TraverseMode::Overwrite {
+                    if result.is_none() || mode == TraverseMode::Overwrite {
                         let mut new = Data::<C>::with_capacity(data.len() + 1);
                         new.extend(
                             data.iter()
@@ -414,14 +417,17 @@ where
                         new.push(state.payload());
                         new.shrink_to_fit();
                         let new = owned_data::<C>(new);
-                        if !replace(new, true) {
+                        if let Some(new) = replace(new, true) {
+                            if result.is_none() && mode == TraverseMode::IfMissing {
+                                let new = unsafe { load_data::<C>(new) };
+                                result = Some(ExistingOrNew::New(new.last().unwrap()));
+                            }
+                        } else {
                             continue;
                         }
                     }
 
-                    return old
-                        .map(ExistingOrNew::Existing)
-                        .or_else(|| state.into_return(mode).map(ExistingOrNew::New));
+                    return result;
                 }
             } else {
                 // An inner node, go one level deeper.
@@ -434,24 +440,24 @@ where
         }
     }
 
-    pub fn get<Q>(&self, key: &Q) -> Option<C::Payload>
+    pub fn get<'r, 's, 'p, Q>(&'s self, key: &Q, pin: &'p Guard) -> Option<&'r C::Payload>
     where
+        's: 'r,
+        'p: 's,
         Q: ?Sized + Eq + Hash,
         C::Key: Borrow<Q>,
     {
         let mut current = &self.root;
         let mut hash = self.hash(key);
-        let pin = crossbeam_epoch::pin();
         loop {
-            let node = current.load(Ordering::Acquire, &pin);
+            let node = current.load(Ordering::Acquire, pin);
             let flags = nf(node);
             if node.is_null() {
                 return None;
             } else if flags.contains(NodeFlags::DATA) {
                 return unsafe { load_data::<C>(node) }
                     .iter()
-                    .find(|l| (*l).borrow().borrow() == key)
-                    .cloned();
+                    .find(|l| (*l).borrow().borrow() == key);
             } else {
                 let inner = unsafe { node.as_ref().expect("We just checked this is not NULL") };
                 let bits = hash & LEVEL_MASK;
@@ -461,26 +467,34 @@ where
         }
     }
 
-    pub fn get_or_insert_with<F>(&self, key: C::Key, create: F) -> ExistingOrNew<C::Payload>
+    pub fn get_or_insert_with<'s, 'p, 'r, F>(
+        &'s self,
+        key: C::Key,
+        create: F,
+        pin: &'p Guard,
+    ) -> ExistingOrNew<&'r C::Payload>
     where
+        's: 'r,
+        'p: 'r,
         F: FnOnce(C::Key) -> C::Payload,
     {
         let state = TraverseState::Future {
             key,
             constructor: create,
         };
-        self.traverse(state, TraverseMode::IfMissing)
+        self.traverse(state, TraverseMode::IfMissing, pin)
             .expect("Should have created one for me")
     }
 
-    pub fn remove<Q>(&self, key: &Q) -> Option<C::Payload>
+    pub fn remove<'r, 's, 'p, Q>(&'s self, key: &Q, pin: &'p Guard) -> Option<&'r C::Payload>
     where
+        's: 'r,
+        'p: 'r,
         Q: ?Sized + Eq + Hash,
         C::Key: Borrow<Q>,
     {
         let mut current = &self.root;
         let hash = self.hash(key);
-        let pin = crossbeam_epoch::pin();
         let mut shift = 0;
         let mut levels: ArrayVec<[_; MAX_LEVELS]> = ArrayVec::new();
         let deleted = loop {
@@ -527,7 +541,7 @@ where
                     .iter()
                     .filter(|l| {
                         if (*l).borrow().borrow() == key {
-                            deleted = Some((*l).clone());
+                            deleted = Some(*l);
                             false
                         } else {
                             true
