@@ -11,6 +11,7 @@ use crossbeam_epoch::{Atomic, Guard, Owned, Shared};
 use smallvec::SmallVec;
 
 pub mod config;
+pub mod iterator;
 
 use self::config::Config;
 use crate::existing_or_new::ExistingOrNew;
@@ -656,8 +657,6 @@ where
 
         handle_ptr::<C>(&self.root, &mut 0, &mut false);
     }
-
-    // TODO: Iteration & friends
 }
 
 impl<C: Config, S> Drop for Raw<C, S> {

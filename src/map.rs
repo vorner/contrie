@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::existing_or_new::ExistingOrNew;
 use crate::raw::config::Config;
-use crate::raw::Raw;
+use crate::raw::{self, Raw};
 
 // :-( It would be nice if we could provide deref to (K, V). But that is incompatible with unsized
 // values.
@@ -55,6 +55,27 @@ where
 {
     type Payload = MapPayload<K, V>;
     type Key = K;
+}
+
+pub struct Iter<'a, K, V, S>
+where
+    // TODO: It would be great if the bounds wouldn't have to be on the struct, only on the impls
+    K: Hash + Eq,
+    V: ?Sized,
+{
+    inner: raw::iterator::Iter<'a, MapConfig<K, V>, S>,
+}
+
+impl<'a, K, V, S> Iterator for Iter<'a, K, V, S>
+where
+    // TODO: It would be great if the bounds wouldn't have to be on the struct, only on the impls
+    K: Hash + Eq,
+    V: ?Sized,
+{
+    type Item = Arc<Node<K, V>>;
+    fn next(&mut self) -> Option<Arc<Node<K, V>>> {
+        self.inner.next().map(|p| Arc::clone(&p.0))
+    }
 }
 
 // TODO: Bunch of derives? Which ones? And which one do we need to implement?
@@ -159,6 +180,12 @@ where
     pub fn is_empty(&self) -> bool {
         self.raw.is_empty()
     }
+
+    pub fn iter(&self) -> Iter<K, V, S> {
+        Iter {
+            inner: raw::iterator::Iter::new(&self.raw),
+        }
+    }
 }
 
 impl<K, V> Default for ConMap<K, V>
@@ -168,6 +195,19 @@ where
 {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<'a, K, V, S> IntoIterator for &'a ConMap<K, V, S>
+where
+    K: Hash + Eq,
+    V: ?Sized,
+    S: BuildHasher,
+{
+    type Item = Arc<Node<K, V>>;
+    type IntoIter = Iter<'a, K, V, S>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
     }
 }
 
