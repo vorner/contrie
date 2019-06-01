@@ -14,17 +14,6 @@ pub mod config;
 
 use self::config::Config;
 
-// TODO: Rename Leaf. It's a public name and a bit silly/leaks implementation details.
-// TODO: Make this whole type private and implement better/all APIs around it? Maybe make it
-// customizable even more ‒ synchronization, keys other than hashes (arbitrary byte strings?),
-// copy/clone directly instead of storing just the key. But certainly different things for sets (we
-// want the whole API to be Arc<K>, not Arc<Node>).
-// TODO: Iterators (from, into, extend)
-// TODO: Rayon support (from and into parallel iterator, extend) under a feature flag.
-// TODO: Valgrind into the CI
-// TODO: Split into multiple files
-// TODO: Some refactoring around the pointer juggling. This seems to be error prone.
-
 // All directly written, some things are not const fn yet :-(. But tested below.
 pub(crate) const LEVEL_BITS: usize = 4;
 pub(crate) const LEVEL_MASK: u64 = 0b1111;
@@ -641,7 +630,6 @@ impl<C: Config, S> Drop for Raw<C, S> {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::super::ConMap;
     use super::*;
 
     // A hasher to create collisions on purpose. Let's make the hash trie into a glorified array.
