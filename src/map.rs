@@ -2,38 +2,33 @@ use std::borrow::Borrow;
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hash};
 use std::marker::PhantomData;
-use std::ops::Deref;
 use std::sync::Arc;
 
 use crate::existing_or_new::ExistingOrNew;
 use crate::raw::config::Config;
 use crate::raw::Raw;
 
+// :-( It would be nice if we could provide deref to (K, V). But that is incompatible with unsized
+// values.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct Node<K, V: ?Sized> {
-    data: (K, V),
+    key: K,
+    value: V,
 }
 
 impl<K, V> Node<K, V> {
     pub fn new(key: K, value: V) -> Self {
-        Self { data: (key, value) }
+        Self { key, value }
     }
 }
 
 impl<K, V: ?Sized> Node<K, V> {
     pub fn key(&self) -> &K {
-        &self.data.0
+        &self.key
     }
 
     pub fn value(&self) -> &V {
-        &self.data.1
-    }
-}
-
-impl<K, V: ?Sized> Deref for Node<K, V> {
-    type Target = (K, V);
-    fn deref(&self) -> &(K, V) {
-        &self.data
+        &self.value
     }
 }
 
@@ -92,28 +87,14 @@ where
         self.insert_node(Arc::new(Node::new(key, value)))
     }
 
-    pub fn insert_node(&self, node: Arc<Node<K, V>>) -> Option<Arc<Node<K, V>>> {
-        let pin = crossbeam_epoch::pin();
-        self.raw
-            .insert(MapPayload(node), &pin)
-            .map(|p| Arc::clone(&p.0))
-    }
-
     pub fn get_or_insert_with<F>(&self, key: K, create: F) -> ExistingOrNew<Arc<Node<K, V>>>
     where
         F: FnOnce() -> V,
     {
-        let pin = crossbeam_epoch::pin();
-        self.raw
-            .get_or_insert_with(
-                key,
-                |key| {
-                    let value = create();
-                    MapPayload(Arc::new(Node::new(key, value)))
-                },
-                &pin,
-            )
-            .map(|payload| Arc::clone(&payload.0))
+        self.get_or_insert_with_node(key, |key| {
+            let value = create();
+            Arc::new(Node::new(key, value))
+        })
     }
 
     pub fn get_or_insert(&self, key: K, value: V) -> ExistingOrNew<Arc<Node<K, V>>> {
@@ -125,6 +106,36 @@ where
         V: Default,
     {
         self.get_or_insert_with(key, V::default)
+    }
+}
+
+impl<K, V, S> ConMap<K, V, S>
+where
+    K: Hash + Eq,
+    V: ?Sized,
+    S: BuildHasher,
+{
+    pub fn with_hasher(hasher: S) -> Self {
+        Self {
+            raw: Raw::with_hasher(hasher),
+        }
+    }
+
+    pub fn insert_node(&self, node: Arc<Node<K, V>>) -> Option<Arc<Node<K, V>>> {
+        let pin = crossbeam_epoch::pin();
+        self.raw
+            .insert(MapPayload(node), &pin)
+            .map(|p| Arc::clone(&p.0))
+    }
+
+    pub fn get_or_insert_with_node<F>(&self, key: K, create: F) -> ExistingOrNew<Arc<Node<K, V>>>
+    where
+        F: FnOnce(K) -> Arc<Node<K, V>>,
+    {
+        let pin = crossbeam_epoch::pin();
+        self.raw
+            .get_or_insert_with(key, |key| MapPayload(create(key)), &pin)
+            .map(|payload| Arc::clone(&payload.0))
     }
 
     pub fn get<Q>(&self, key: &Q) -> Option<Arc<Node<K, V>>>
@@ -147,19 +158,6 @@ where
 
     pub fn is_empty(&self) -> bool {
         self.raw.is_empty()
-    }
-}
-
-impl<K, V, S> ConMap<K, V, S>
-where
-    K: Hash + Eq,
-    V: ?Sized,
-    S: BuildHasher,
-{
-    pub fn with_hasher(hasher: S) -> Self {
-        Self {
-            raw: Raw::with_hasher(hasher),
-        }
     }
 }
 
@@ -417,5 +415,24 @@ mod tests {
 
         map.raw.assert_pruned();
         assert!(map.is_empty());
+    }
+
+    #[test]
+    fn unsized_values() {
+        let map: ConMap<usize, [usize]> = ConMap::new();
+        assert!(map
+            .insert_node(Arc::new(Node::new(42, [1, 2, 3])))
+            .is_none());
+        let found = map.get(&42).unwrap();
+        assert_eq!(&[1, 2, 3], found.value());
+        let inserted = map.get_or_insert_with_node(0, |k| {
+            assert_eq!(0, k);
+            Arc::new(Node::new(k, []))
+        });
+        assert_eq!(0, *inserted.key());
+        assert!(inserted.value().is_empty());
+        assert!(inserted.is_new());
+        let removed = map.remove(&0).unwrap();
+        assert_eq!(inserted.into_inner(), removed);
     }
 }
