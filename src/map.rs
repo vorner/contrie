@@ -5,10 +5,10 @@ use std::marker::PhantomData;
 use std::ops::Deref;
 use std::sync::Arc;
 
+use crate::existing_or_new::ExistingOrNew;
 use crate::raw::config::Config;
 use crate::raw::Raw;
 
-// TODO: These things probably should go into some map.rs and be mostly hidden there
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct Node<K, V: ?Sized> {
     data: (K, V),
@@ -96,8 +96,7 @@ where
         self.raw.insert(MapPayload(node)).map(|p| p.0)
     }
 
-    // TODO: Return a tuple if it inserted a new one or found existing.
-    pub fn get_or_insert_with<F>(&self, key: K, create: F) -> Arc<Node<K, V>>
+    pub fn get_or_insert_with<F>(&self, key: K, create: F) -> ExistingOrNew<Arc<Node<K, V>>>
     where
         F: FnOnce() -> V,
     {
@@ -106,14 +105,14 @@ where
                 let value = create();
                 MapPayload(Arc::new(Node::new(key, value)))
             })
-            .0
+            .map(|payload| payload.0)
     }
 
-    pub fn get_or_insert(&self, key: K, value: V) -> Arc<Node<K, V>> {
+    pub fn get_or_insert(&self, key: K, value: V) -> ExistingOrNew<Arc<Node<K, V>>> {
         self.get_or_insert_with(key, || value)
     }
 
-    pub fn get_or_insert_default(&self, key: K) -> Arc<Node<K, V>>
+    pub fn get_or_insert_default(&self, key: K) -> ExistingOrNew<Arc<Node<K, V>>>
     where
         V: Default,
     {
@@ -290,6 +289,7 @@ mod tests {
         let val = map.get_or_insert("hello", 42);
         assert_eq!(42, *val.value());
         assert_eq!("hello", *val.key());
+        assert!(val.is_new());
     }
 
     #[test]
@@ -300,6 +300,7 @@ mod tests {
         // We still have the original
         assert_eq!(42, *val.value());
         assert_eq!("hello", *val.key());
+        assert!(!val.is_new());
     }
 
     fn get_or_insert_many_inner<H: BuildHasher>(map: ConMap<usize, usize, H>, len: usize) {
@@ -307,12 +308,14 @@ mod tests {
             let val = map.get_or_insert(i, i);
             assert_eq!(i, *val.key());
             assert_eq!(i, *val.value());
+            assert!(val.is_new());
         }
 
         for i in 0..len {
             let val = map.get_or_insert(i, 0);
             assert_eq!(i, *val.key());
             assert_eq!(i, *val.value());
+            assert!(!val.is_new());
         }
     }
 

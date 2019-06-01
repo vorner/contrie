@@ -13,6 +13,7 @@ use smallvec::SmallVec;
 pub mod config;
 
 use self::config::Config;
+use crate::existing_or_new::ExistingOrNew;
 
 // All directly written, some things are not const fn yet :-(. But tested below.
 pub(crate) const LEVEL_BITS: usize = 4;
@@ -207,6 +208,8 @@ where
             TraverseState::<C, fn(C::Key) -> C::Payload>::Created(payload),
             TraverseMode::Overwrite,
         )
+        // TODO: Should we sanity-check this is Existing because it returns the previous value?
+        .map(ExistingOrNew::into_inner)
     }
 
     /// Prunes the given node.
@@ -304,7 +307,11 @@ where
         }
     }
 
-    fn traverse<F>(&self, mut state: TraverseState<C, F>, mode: TraverseMode) -> Option<C::Payload>
+    fn traverse<F>(
+        &self,
+        mut state: TraverseState<C, F>,
+        mode: TraverseMode,
+    ) -> Option<ExistingOrNew<C::Payload>>
     where
         F: FnOnce(C::Key) -> C::Payload,
     {
@@ -362,7 +369,7 @@ where
             } else if node.is_null() {
                 // Not found, create it.
                 if replace(state.data_owned(), true) {
-                    return state.into_return(mode);
+                    return state.into_return(mode).map(ExistingOrNew::New);
                 }
             // else -> retry
             } else if flags.contains(NodeFlags::DATA) {
@@ -413,7 +420,9 @@ where
                         }
                     }
 
-                    return old.or_else(|| state.into_return(mode));
+                    return old
+                        .map(ExistingOrNew::Existing)
+                        .or_else(|| state.into_return(mode).map(ExistingOrNew::New));
                 }
             } else {
                 // An inner node, go one level deeper.
@@ -453,7 +462,7 @@ where
         }
     }
 
-    pub fn get_or_insert_with<F>(&self, key: C::Key, create: F) -> C::Payload
+    pub fn get_or_insert_with<F>(&self, key: C::Key, create: F) -> ExistingOrNew<C::Payload>
     where
         F: FnOnce(C::Key) -> C::Payload,
     {
