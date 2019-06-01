@@ -11,10 +11,11 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::hash::Hash;
 
-use contrie::ConMap;
 use proptest::collection::vec;
 use proptest::prelude::*;
 use rayon::prelude::*;
+
+use crate::ConMap;
 
 #[derive(Debug, Clone)]
 enum Instruction<K, V> {
