@@ -238,9 +238,8 @@ where
         // 2. Look how many non-null branches are leading from there.
         // 3. Construct a copy of the child *without* the tags on the way.
         for (new, grandchild) in new_child.0.iter_mut().zip(&inner.0) {
-            // Acquire ‒ we don't need the grandchild ourselves, only the pointer. But we'll need
-            // to "republish" it through the parent pointer later on and for that we have to get it
-            // first.
+            // Acquire ‒ Besides potentially looking at the child, we'll need to republish the
+            // child in our swap of the pointer. To do that we'll have to have acquired it.
             //
             // FIXME: May we actually need SeqCst here to order it relative to the CAS below?
             let gc = grandchild.fetch_or(NodeFlags::CONDEMNED.bits(), Ordering::Acquire, pin);
@@ -252,7 +251,8 @@ where
                 // Do nothing, just skip
             } else if flags.contains(NodeFlags::DATA) {
                 last_leaf.replace(gc);
-                child_cnt += 1;
+                let gc = load_data::<C>(gc);
+                child_cnt += gc.len();
             } else {
                 // If we have an inner node here, multiple leaves hang somewhere below there. More
                 // importantly, we can't contrack the edge.
@@ -374,10 +374,9 @@ where
             // else -> retry
             } else if flags.contains(NodeFlags::DATA) {
                 let data = unsafe { load_data::<C>(node) };
-                if data.len() == 1
-                    && data[0].borrow() != state.key()
-                    && shift < mem::size_of_val(&hash) * 8
-                {
+                assert!(!data.is_empty(), "Empty data nodes must not be kept around");
+                if data[0].borrow() != state.key() && shift < mem::size_of_val(&hash) * 8 {
+                    assert!(data.len() == 1, "Collision node not deep enough");
                     // There's one data node at this pointer, but we want to place a different one
                     // here too. So we create a new level, push the old one down. Note that we
                     // check both that we are adding something else & that we still have some more
@@ -602,6 +601,48 @@ where
         }
     }
 
+    // Hack: &mut to make sure it is not shared between threads and nobody is modifying the thing
+    // right now.
+    #[cfg(test)]
+    pub(crate) fn assert_pruned(&mut self) {
+        fn handle_ptr<C: Config>(ptr: &Atomic<Inner>, data_cnt: &mut usize, seen_inner: &mut bool) {
+            // Unprotected is fine, we are &mut so nobody else is allowed to do stuff to us at the
+            // moment.
+            let pin = unsafe { crossbeam_epoch::unprotected() };
+            // Relaxed is fine for the same reason ‒ we are &mut
+            let sub = ptr.load(Ordering::Relaxed, &pin);
+            let flags = nf(sub);
+
+            assert!(!flags.contains(NodeFlags::CONDEMNED));
+
+            if sub.is_null() {
+                return;
+            } else if flags.contains(NodeFlags::DATA) {
+                let data = unsafe { load_data::<C>(sub) };
+                assert!(data.len() > 0, "Empty data nodes should not exist");
+                *data_cnt += data.len();
+            } else {
+                let sub = unsafe { sub.deref() };
+                *seen_inner = true;
+                check_node::<C>(sub);
+            }
+        }
+        fn check_node<C: Config>(node: &Inner) {
+            let mut data_cnt = 0;
+            let mut seen_inner = false;
+            for ptr in &node.0 {
+                handle_ptr::<C>(ptr, &mut data_cnt, &mut seen_inner);
+            }
+
+            assert!(
+                data_cnt > 1 || seen_inner,
+                "This node should have been pruned"
+            );
+        }
+
+        handle_ptr::<C>(&self.root, &mut 0, &mut false);
+    }
+
     // TODO: Iteration & friends
 }
 
@@ -668,3 +709,6 @@ pub(crate) mod tests {
         assert_eq!(LEVEL_CELLS, 2usize.pow(LEVEL_BITS as u32));
     }
 }
+
+// TODO: Tests for correct dropping of values. And maybe add some canary values during tests?
+// TODO: Tests for when some action finds a condemned pointer somewhere

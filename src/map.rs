@@ -342,7 +342,7 @@ mod tests {
         assert!(map.is_empty());
     }
 
-    fn remove_many_inner<H: BuildHasher>(map: ConMap<usize, usize, H>, len: usize) {
+    fn remove_many_inner<H: BuildHasher>(mut map: ConMap<usize, usize, H>, len: usize) {
         for i in 0..len {
             assert!(map.insert(i, i).is_none());
         }
@@ -350,6 +350,7 @@ mod tests {
             assert_eq!(i, *map.get(&i).unwrap().value());
             assert_eq!(i, *map.remove(&i).unwrap().value());
             assert!(map.get(&i).is_none());
+            map.raw.assert_pruned();
         }
 
         assert!(map.is_empty());
@@ -365,54 +366,46 @@ mod tests {
         remove_many_inner(ConMap::with_hasher(NoHasher), TEST_BATCH_SMALL);
     }
 
-    /*
-     * XXX: Revive this test.
     #[test]
     fn collision_remove_one_left() {
-        let map = ConMap::with_hasher(NoHasher);
+        let mut map = ConMap::with_hasher(NoHasher);
         map.insert(1, 1);
         map.insert(2, 2);
 
-        fn find_data<'g>(
-            map: &ConMap<usize, usize, NoHasher>,
-            pin: &'g Guard,
-        ) -> Option<&'g Data<usize, usize>> {
-            let mut cur = &map.raw.root;
-            // Relaxed ‒ we are the only thread around
-            loop {
-                let node = cur.load(Ordering::Relaxed, &pin);
-                assert!(!node.is_null());
-                let flags = nf(node);
-                if flags.contains(NodeFlags::DATA) {
-                    return Some(unsafe { load_data(node) });
-                } else {
-                    let inner = unsafe { node.deref() };
-                    cur = inner
-                        .0
-                        .iter()
-                        .find(|c| !c.load(Ordering::Relaxed, pin).is_null())?;
-                }
-            }
-        };
-
-        {
-            let pin = crossbeam_epoch::pin();
-            assert_eq!(2, find_data(&map, &pin).expect("Node missing").len());
-        }
+        map.raw.assert_pruned();
 
         assert!(map.remove(&2).is_some());
-
-        {
-            let pin = crossbeam_epoch::pin();
-            assert_eq!(1, find_data(&map, &pin).expect("Node missing").len());
-        }
+        map.raw.assert_pruned();
 
         assert!(map.remove(&1).is_some());
 
+        map.raw.assert_pruned();
         assert!(map.is_empty());
     }
-    */
-}
 
-// TODO: Tests for correct dropping of values. And maybe add some canary values during tests?
-// TODO: Tests for when some action finds a condemned pointer somewhere
+    #[test]
+    fn remove_par() {
+        let mut map = ConMap::new();
+        for i in 0..TEST_THREADS * TEST_BATCH {
+            map.insert(i, i);
+        }
+
+        thread::scope(|s| {
+            for t in 0..TEST_THREADS {
+                let map = &map;
+                s.spawn(move |_| {
+                    for i in 0..TEST_BATCH {
+                        let num = t * TEST_BATCH + i;
+                        let val = map.remove(&num).unwrap();
+                        assert_eq!(num, *val.value());
+                        assert_eq!(num, *val.key());
+                    }
+                });
+            }
+        })
+        .unwrap();
+
+        map.raw.assert_pruned();
+        assert!(map.is_empty());
+    }
+}

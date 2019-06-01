@@ -16,3 +16,8 @@ smallvec = "~0.6"
 crossbeam-utils = "~0.6"
 proptest = "~0.9.3"
 rayon = "~1"
+
+[profile.test]
+# Some tests are rather slow. Furthermore, optimalisations tend to provoke races and UBs to
+# manifest, so we want to try that in tests if possible.
+opt-level = 1
