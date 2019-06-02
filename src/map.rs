@@ -475,4 +475,27 @@ mod tests {
         let removed = map.remove(&0).unwrap();
         assert_eq!(inserted.into_inner(), removed);
     }
+
+    fn iter_test_inner<S: BuildHasher>(map: ConMap<usize, usize, S>) {
+        for i in 0..TEST_BATCH_SMALL {
+            assert!(map.insert(i, i).is_none());
+        }
+
+        let mut extracted = map.iter().map(|v| *v.value()).collect::<Vec<_>>();
+        extracted.sort();
+        let expected = (0..TEST_BATCH_SMALL).into_iter().collect::<Vec<_>>();
+        assert_eq!(expected, extracted);
+    }
+
+    #[test]
+    fn iter() {
+        let map = ConMap::new();
+        iter_test_inner(map);
+    }
+
+    #[test]
+    fn iter_collision() {
+        let map = ConMap::with_hasher(NoHasher);
+        iter_test_inner(map);
+    }
 }

@@ -39,7 +39,7 @@ where
     C: Config,
 {
     pin: Guard,
-    levels: ArrayVec<[Level<'a>; MAX_LEVELS]>,
+    levels: ArrayVec<[Level<'a>; MAX_LEVELS + 1]>,
     _map: PhantomData<&'a Raw<C, S>>,
 }
 
@@ -61,6 +61,7 @@ where
     }
 
     // Not an iterator because this borrows out of the iterator itself (and effectively its pin).
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<&C::Payload> {
         loop {
             let top = self.levels.last_mut()?;
@@ -70,14 +71,14 @@ where
                 self.levels.pop();
             } else if flags.contains(NodeFlags::DATA) {
                 let data = unsafe { load_data::<C>(top.ptr) };
-                if data.len() < top.idx {
+                if top.idx < data.len() {
                     let result = &data[top.idx];
                     top.idx += 1;
                     return Some(result);
                 } else {
                     self.levels.pop();
                 }
-            } else if top.idx <= LEVEL_CELLS {
+            } else if top.idx < LEVEL_CELLS {
                 let node = unsafe { top.ptr.deref() };
                 let ptr = node.0[top.idx].load(Ordering::Acquire, &self.pin);
                 let ptr = unsafe { extend_lifetime(ptr) };
