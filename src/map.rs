@@ -1,6 +1,7 @@
 use std::borrow::Borrow;
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hash};
+use std::iter::FromIterator;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -208,6 +209,93 @@ where
     type IntoIter = Iter<'a, K, V, S>;
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
+    }
+}
+
+impl<'a, K, V, S> Extend<Arc<Node<K, V>>> for &'a ConMap<K, V, S>
+where
+    K: Hash + Eq,
+    V: ?Sized,
+    S: BuildHasher,
+{
+    fn extend<T>(&mut self, iter: T)
+    where
+        T: IntoIterator<Item = Arc<Node<K, V>>>,
+    {
+        for n in iter {
+            self.insert_node(n);
+        }
+    }
+}
+
+impl<'a, K, V, S> Extend<(K, V)> for &'a ConMap<K, V, S>
+where
+    K: Hash + Eq,
+    S: BuildHasher,
+{
+    fn extend<T>(&mut self, iter: T)
+    where
+        T: IntoIterator<Item = (K, V)>,
+    {
+        self.extend(iter.into_iter().map(|(k, v)| Arc::new(Node::new(k, v))));
+    }
+}
+
+impl<K, V, S> Extend<Arc<Node<K, V>>> for ConMap<K, V, S>
+where
+    K: Hash + Eq,
+    V: ?Sized,
+    S: BuildHasher,
+{
+    fn extend<T>(&mut self, iter: T)
+    where
+        T: IntoIterator<Item = Arc<Node<K, V>>>,
+    {
+        let mut me: &ConMap<_, _, _> = self;
+        me.extend(iter);
+    }
+}
+
+impl<K, V, S> Extend<(K, V)> for ConMap<K, V, S>
+where
+    K: Hash + Eq,
+    S: BuildHasher,
+{
+    fn extend<T>(&mut self, iter: T)
+    where
+        T: IntoIterator<Item = (K, V)>,
+    {
+        let mut me: &ConMap<_, _, _> = self;
+        me.extend(iter);
+    }
+}
+
+impl<K, V> FromIterator<Arc<Node<K, V>>> for ConMap<K, V>
+where
+    K: Hash + Eq,
+    V: ?Sized,
+{
+    fn from_iter<T>(iter: T) -> Self
+    where
+        T: IntoIterator<Item = Arc<Node<K, V>>>,
+    {
+        let mut me = ConMap::new();
+        me.extend(iter);
+        me
+    }
+}
+
+impl<K, V> FromIterator<(K, V)> for ConMap<K, V>
+where
+    K: Hash + Eq,
+{
+    fn from_iter<T>(iter: T) -> Self
+    where
+        T: IntoIterator<Item = (K, V)>,
+    {
+        let mut me = ConMap::new();
+        me.extend(iter);
+        me
     }
 }
 
@@ -497,5 +585,57 @@ mod tests {
     fn iter_collision() {
         let map = ConMap::with_hasher(NoHasher);
         iter_test_inner(map);
+    }
+
+    #[test]
+    fn collect() {
+        let map = (0..TEST_BATCH_SMALL)
+            .into_iter()
+            .map(|i| (i, i))
+            .collect::<ConMap<_, _>>();
+
+        let mut extracted = map
+            .iter()
+            .map(|n| {
+                assert_eq!(n.key(), n.value());
+                *n.value()
+            })
+            .collect::<Vec<_>>();
+
+        extracted.sort();
+        let expected = (0..TEST_BATCH_SMALL).into_iter().collect::<Vec<_>>();
+        assert_eq!(expected, extracted);
+    }
+
+    #[test]
+    fn par_extend() {
+        let map = ConMap::new();
+        thread::scope(|s| {
+            for t in 0..TEST_THREADS {
+                let mut map = &map;
+                s.spawn(move |_| {
+                    let start = t * TEST_BATCH_SMALL;
+                    let iter = (start..start + TEST_BATCH_SMALL)
+                        .into_iter()
+                        .map(|i| (i, i));
+                    map.extend(iter);
+                });
+            }
+        })
+        .unwrap();
+
+        let mut extracted = map
+            .iter()
+            .map(|n| {
+                assert_eq!(n.key(), n.value());
+                *n.value()
+            })
+            .collect::<Vec<_>>();
+
+        extracted.sort();
+        let expected = (0..TEST_THREADS * TEST_BATCH_SMALL)
+            .into_iter()
+            .collect::<Vec<_>>();
+        assert_eq!(expected, extracted);
     }
 }
