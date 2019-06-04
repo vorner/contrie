@@ -23,7 +23,6 @@ pub(crate) const LEVEL_MASK: u64 = 0b1111;
 pub(crate) const LEVEL_CELLS: usize = 16;
 pub(crate) const MAX_LEVELS: usize = mem::size_of::<u64>() * 8 / LEVEL_BITS;
 
-// TODO: Checks that we really do have the bits in the alignment.
 bitflags! {
     /// Flags that can be put onto a pointer pointing to a node, specifying some interesting
     /// things.
@@ -175,6 +174,17 @@ where
     S: BuildHasher,
 {
     pub fn with_hasher(hash_builder: S) -> Self {
+        // Note: on any sane system, these assertions should actually never ever trigger no matter
+        // what the user of the crate does. This is *internal* sanity check. If you ever find a
+        // case where it *does* fail, open a bug report.
+        assert!(
+            mem::align_of::<Data<C>>().trailing_zeros() >= NodeFlags::all().bits().count_ones(),
+            "BUG: Alignment of Data<Payload> is not large enough to store the internal flags",
+        );
+        assert!(
+            mem::align_of::<Inner>().trailing_zeros() >= NodeFlags::all().bits().count_ones(),
+            "BUG: Alignment of Inner not large enough to store internal flags",
+        );
         Self {
             hash_builder,
             root: Atomic::null(),
@@ -717,6 +727,7 @@ pub(crate) mod tests {
 
     #[test]
     fn consts_consistent() {
+        assert!(LEVEL_CELLS.is_power_of_two());
         assert_eq!(LEVEL_BITS, LEVEL_MASK.count_ones() as usize);
         assert_eq!(LEVEL_BITS, (!LEVEL_MASK).trailing_zeros() as usize);
         assert_eq!(LEVEL_CELLS, 2usize.pow(LEVEL_BITS as u32));
