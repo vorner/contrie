@@ -3,7 +3,6 @@
 * Maybe some other types (for eg. clone types instead of arcing them?)
 * Parametrize the things with specification about sequential consistency
   - So people can rely on relative order of insertions, etc.
-* Iterators
 * Rayon support
 * Valgrind into CI
 * Split the raw/mod.rs into multiple files? It is definitely getting a bit long.
