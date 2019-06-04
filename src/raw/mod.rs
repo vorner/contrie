@@ -11,6 +11,7 @@ use crossbeam_epoch::{Atomic, Guard, Owned, Shared};
 use smallvec::SmallVec;
 
 pub mod config;
+pub mod debug;
 pub mod iterator;
 
 use self::config::Config;
@@ -615,48 +616,6 @@ where
                 .is_null()
         }
     }
-
-    // Hack: &mut to make sure it is not shared between threads and nobody is modifying the thing
-    // right now.
-    #[cfg(test)]
-    pub(crate) fn assert_pruned(&mut self) {
-        fn handle_ptr<C: Config>(ptr: &Atomic<Inner>, data_cnt: &mut usize, seen_inner: &mut bool) {
-            // Unprotected is fine, we are &mut so nobody else is allowed to do stuff to us at the
-            // moment.
-            let pin = unsafe { crossbeam_epoch::unprotected() };
-            // Relaxed is fine for the same reason ‒ we are &mut
-            let sub = ptr.load(Ordering::Relaxed, &pin);
-            let flags = nf(sub);
-
-            assert!(!flags.contains(NodeFlags::CONDEMNED));
-
-            if sub.is_null() {
-                return;
-            } else if flags.contains(NodeFlags::DATA) {
-                let data = unsafe { load_data::<C>(sub) };
-                assert!(data.len() > 0, "Empty data nodes should not exist");
-                *data_cnt += data.len();
-            } else {
-                let sub = unsafe { sub.deref() };
-                *seen_inner = true;
-                check_node::<C>(sub);
-            }
-        }
-        fn check_node<C: Config>(node: &Inner) {
-            let mut data_cnt = 0;
-            let mut seen_inner = false;
-            for ptr in &node.0 {
-                handle_ptr::<C>(ptr, &mut data_cnt, &mut seen_inner);
-            }
-
-            assert!(
-                data_cnt > 1 || seen_inner,
-                "This node should have been pruned"
-            );
-        }
-
-        handle_ptr::<C>(&self.root, &mut 0, &mut false);
-    }
 }
 
 impl<C: Config, S> Drop for Raw<C, S> {
@@ -693,6 +652,9 @@ impl<C: Config, S> Drop for Raw<C, S> {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::ptr;
+
+    use super::config::Trivial as TrivialConfig;
     use super::*;
 
     // A hasher to create collisions on purpose. Let's make the hash trie into a glorified array.
@@ -715,13 +677,182 @@ pub(crate) mod tests {
         }
     }
 
+    #[derive(Clone, Copy, Debug, Default)]
+    pub(crate) struct SplatHasher(u64);
+
+    impl Hasher for SplatHasher {
+        fn finish(&self) -> u64 {
+            self.0
+        }
+        fn write(&mut self, value: &[u8]) {
+            for val in value {
+                for idx in 0..mem::size_of::<u64>() {
+                    self.0 ^= (*val as u64) << 8 * idx;
+                }
+            }
+        }
+    }
+
+    pub(crate) struct MakeSplatHasher;
+
+    impl BuildHasher for MakeSplatHasher {
+        type Hasher = SplatHasher;
+
+        fn build_hasher(&self) -> SplatHasher {
+            SplatHasher::default()
+        }
+    }
+
+    /// Tests the test hasher.
+    ///
+    /// Because it was giving us some trouble ☹
+    #[test]
+    fn splat_hasher() {
+        let mut hasher = MakeSplatHasher.build_hasher();
+        hasher.write_u8(0);
+        assert_eq!(0, hasher.finish());
+        hasher.write_u8(8);
+        assert_eq!(0x0808080808080808, hasher.finish());
+    }
+
     #[test]
     fn consts_consistent() {
         assert_eq!(LEVEL_BITS, LEVEL_MASK.count_ones() as usize);
         assert_eq!(LEVEL_BITS, (!LEVEL_MASK).trailing_zeros() as usize);
         assert_eq!(LEVEL_CELLS, 2usize.pow(LEVEL_BITS as u32));
     }
+
+    /// Pretend something left a condemned marker on one of the nodes when we insert. This will get
+    /// cleaned up.
+    ///
+    /// And yes, the test abuses the fact that it knows how the specific hasher works and
+    /// distributes the given values.
+    #[test]
+    fn prune_on_insert() {
+        let mut map = Raw::<TrivialConfig<u8>, _>::with_hasher(MakeSplatHasher);
+        let pin = crossbeam_epoch::pin();
+        for i in 0..LEVEL_CELLS as u8 {
+            assert!(map.insert(i, &pin).is_none());
+        }
+
+        eprintln!("{}", debug::PrintShape(&map));
+
+        // By now, we should have exactly one data node under each pointer under root. Sanity
+        // check that (Relaxed is fine, we are in a single threaded test).
+        let root = map.root.load(Ordering::Relaxed, &pin);
+        let flags = nf(root);
+        assert_eq!(
+            NodeFlags::empty(),
+            flags,
+            "Root should be non-condemned inner node"
+        );
+        assert!(!root.is_null());
+        let old_root = root.as_raw();
+        let root = unsafe { root.deref() };
+
+        for ptr in &root.0 {
+            let ptr = ptr.load(Ordering::Relaxed, &pin);
+            assert!(!ptr.is_null());
+            let flags = nf(ptr);
+            assert_eq!(
+                NodeFlags::DATA,
+                flags,
+                "Expected a data node, found {:?}",
+                ptr
+            );
+        }
+
+        // Now, *start* condemning the node. Mark the first slot, the one we'll eventually use.
+        root.0[0].fetch_or(NodeFlags::CONDEMNED.bits(), Ordering::Relaxed, &pin);
+
+        // This touches the condemned slot, so it should trigger fixing stuff.
+        let old = map.insert(0, &pin);
+        assert_eq!(0, *old.unwrap());
+
+        // The condemned flag must have disappeared by now.
+        map.assert_pruned();
+
+        // And the root should have changed for a brand new one.
+        let new_root = map.root.load(Ordering::Relaxed, &pin).as_raw();
+        assert!(!ptr::eq(old_root, new_root), "Condemned node not replaced");
+
+        // But all the content is preserved
+        for i in 0..LEVEL_CELLS as u8 {
+            assert_eq!(i, *map.get(&i, &pin).unwrap());
+        }
+    }
+
+    /// Creates an effectively empty map with a leftover (unpruned) but condemned node.
+    ///
+    /// As the algorithm goes, almost everyone who finds it is responsible for cleaning it up.
+    fn with_leftover() -> Raw<TrivialConfig<u8>, MakeSplatHasher> {
+        let map = Raw::<TrivialConfig<u8>, _>::with_hasher(MakeSplatHasher);
+        let pin = crossbeam_epoch::pin();
+
+        let i = Inner::default();
+        i.0[0].fetch_or(NodeFlags::CONDEMNED.bits(), Ordering::Relaxed, &pin);
+        map.root.store(Owned::new(i), Ordering::Relaxed);
+
+        // There's nothing in this map effectively, but it doesn't claim to be empty due to the
+        // non-null pointer.
+        assert!(iterator::Iter::new(&map).next().is_none());
+        assert!(!map.is_empty());
+
+        map
+    }
+
+    /// Similar as the above, but with empty condemned node.
+    ///
+    /// Here we put a fake node somewhere into the aether, make it condemned and see how it
+    /// disappears on insertion.
+    #[test]
+    fn prune_on_insert_empty() {
+        let mut map = with_leftover();
+        let pin = crossbeam_epoch::pin();
+        let old_root = map.root.load(Ordering::Relaxed, &pin).as_raw();
+
+        // Now, let's insert something so it meets the condemned mark
+        assert!(map.insert(0, &pin).is_none());
+
+        map.assert_pruned();
+        let new_root = map.root.load(Ordering::Relaxed, &pin);
+        // It got replaced and the root is directly the data node
+        let new_flags = nf(new_root);
+        assert_eq!(NodeFlags::DATA, new_flags);
+        assert!(
+            !ptr::eq(old_root, new_root.as_raw()),
+            "Condemned node not replaced"
+        );
+    }
+
+    /// Test that if someone left a un-pruned node and remove finds it, it gets rid of it (even in
+    /// cases it does not actually remove anything in particular).
+    #[test]
+    fn prune_on_remove() {
+        let map = Raw::<TrivialConfig<u8>, _>::with_hasher(MakeSplatHasher);
+        let pin = crossbeam_epoch::pin();
+
+        let i_inner = Inner::default();
+        let i_outer = Inner::default();
+        i_outer.0[0].store(
+            Owned::new(i_inner).with_tag(NodeFlags::CONDEMNED.bits()),
+            Ordering::Relaxed,
+        );
+        map.root.store(Owned::new(i_outer), Ordering::Relaxed);
+
+        // There's nothing in this map effectively, but it doesn't claim to be empty due to the
+        // non-null pointer.
+        assert!(iterator::Iter::new(&map).next().is_none());
+        assert!(!map.is_empty());
+
+        assert!(map.remove(&0, &pin).is_none());
+
+        eprintln!("{}", debug::PrintShape(&map));
+
+        assert_eq!(0, map.root.load(Ordering::Relaxed, &pin).tag());
+        // Note: it is still *not* properly pruned. The inner node should have a thread it'll clean
+        // up later on. And we can't contract it as the one below is inner node, not data node.
+    }
 }
 
 // TODO: Tests for correct dropping of values. And maybe add some canary values during tests?
-// TODO: Tests for when some action finds a condemned pointer somewhere

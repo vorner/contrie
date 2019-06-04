@@ -1,5 +1,6 @@
 use std::borrow::Borrow;
 use std::hash::Hash;
+use std::marker::PhantomData;
 
 // TODO: Allow our own hash, returning something else than just u64. Then the constants go here
 // too.
@@ -8,4 +9,14 @@ use std::hash::Hash;
 pub trait Config {
     type Payload: Clone + Borrow<Self::Key>;
     type Key: Hash + Eq;
+}
+
+pub struct Trivial<T>(PhantomData<T>);
+
+impl<T> Config for Trivial<T>
+where
+    T: Clone + Hash + Eq,
+{
+    type Payload = T;
+    type Key = T;
 }

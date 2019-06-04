@@ -90,5 +90,3 @@ where
         }
     }
 }
-
-// TODO: Tests. And for colliding things too.
