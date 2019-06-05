@@ -247,10 +247,14 @@ where
         // 3. Construct a copy of the child *without* the tags on the way.
         for (new, grandchild) in new_child.0.iter_mut().zip(&inner.0) {
             // Acquire ‒ Besides potentially looking at the child, we'll need to republish the
-            // child in our swap of the pointer. To do that we'll have to have acquired it.
+            // child in our swap of the pointer (this one and also the one below, in the CAS). To
+            // do that we'll have to have acquired it first.
             //
-            // FIXME: May we actually need SeqCst here to order it relative to the CAS below?
-            let gc = grandchild.fetch_or(NodeFlags::CONDEMNED.bits(), Ordering::Acquire, pin);
+            // Note that we don't need SeqCst here nor in the CaS below. We don't care about the
+            // order ‒ the tagging is just making sure this particular slot never ever changes the
+            // pointer. The CaS changes the trie in content-equivalent way, so observing either the
+            // old or the new way is fine.
+            let gc = grandchild.fetch_or(NodeFlags::CONDEMNED.bits(), Ordering::AcqRel, pin);
             // The flags we insert into the new one should not contain condemned flag even if it
             // was already present here.
             let flags = nf(gc) & !NodeFlags::CONDEMNED;
