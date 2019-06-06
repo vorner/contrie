@@ -1,4 +1,5 @@
 mod existing_or_new;
+pub mod clone_map;
 pub mod map;
 pub mod raw;
 // Some integration-like tests live here, instead of crate/tests. This is because this allows cargo
@@ -10,4 +11,5 @@ pub mod raw;
 mod tests;
 
 pub use self::existing_or_new::ExistingOrNew;
+pub use self::clone_map::CloneConMap;
 pub use self::map::ConMap;

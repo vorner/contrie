@@ -57,3 +57,4 @@ macro_rules! typed_bench {
 typed_bench!(hash_map, std::collections::HashMap<usize, usize>);
 typed_bench!(btree_map, std::collections::BTreeMap<usize, usize>);
 typed_bench!(contrie_map, contrie::ConMap<usize, usize>);
+typed_bench!(contrie_map_clone, contrie::CloneConMap<usize, usize>);
