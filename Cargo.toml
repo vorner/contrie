@@ -16,6 +16,7 @@ smallvec = "~0.6"
 crossbeam-utils = "~0.6"
 proptest = "~0.9.3"
 rayon = "~1"
+rand = "~0.6"
 
 [profile.test]
 # Some tests are rather slow. Furthermore, optimalisations tend to provoke races and UBs to
