@@ -335,7 +335,7 @@ where
         let mut current = &self.root;
         let mut parent = None;
         loop {
-            let node = current.load(Ordering::Acquire, &pin);
+            let node = current.load_consume(&pin);
             let flags = nf(node);
 
             let replace = |with: Owned<Inner>, delete_previous| {
@@ -466,7 +466,7 @@ where
         let mut current = &self.root;
         let mut hash = self.hash(key);
         loop {
-            let node = current.load(Ordering::Acquire, pin);
+            let node = current.load_consume(pin);
             let flags = nf(node);
             if node.is_null() {
                 return None;
@@ -514,7 +514,7 @@ where
         let mut shift = 0;
         let mut levels: ArrayVec<[_; MAX_LEVELS]> = ArrayVec::new();
         let deleted = loop {
-            let node = current.load(Ordering::Acquire, &pin);
+            let node = current.load_consume(&pin);
             let flags = nf(node);
             let replace = |with: Shared<_>| {
                 let result = current.compare_and_set_weak(node, with, Ordering::Release, &pin);
