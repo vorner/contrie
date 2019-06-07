@@ -1,8 +1,13 @@
+//! The core implementation of the concurrent trie data structure.
+//!
+//! This module contains the [`Raw`] type, which is the engine of all the data structures in this
+//! crate. This is exposed to allow wrapping it into further APIs, but is probably not the best
+//! thing for general use.
+
 use std::borrow::Borrow;
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::marker::PhantomData;
 use std::mem;
-use std::ops::Deref;
 use std::sync::atomic::Ordering;
 
 use arrayvec::ArrayVec;
@@ -37,15 +42,25 @@ bitflags! {
         const CONDEMNED = 0b01;
         /// The pointer points not to an inner node, but to data node.
         ///
-        /// TODO: Describe the trick better.
+        /// # Rationale
+        ///
+        /// The [`Inner`] nodes are quite large. On the other hand, the values are usually just
+        /// [`Arc`][std::sync::Arc] and there's usually just one at each leaf. That leaves a lot of
+        /// wasted space.
+        ///
+        /// Therefore, instead of having an enum, we have nodes of two distinct types. We recognize
+        /// them by this flag in the pointer pointing to them. If it is a leaf with data, this flag
+        /// is set and anyone accessing it knows it needs to type cast the pointer before using.
         const DATA = 0b10;
     }
 }
 
+/// Extracts [`NodeFlags`] from a pointer.
 fn nf(node: Shared<Inner>) -> NodeFlags {
     NodeFlags::from_bits(node.tag()).expect("Invalid node flags")
 }
 
+/// Type-casts the pointer to a [`Data`] node.
 unsafe fn load_data<'a, C: Config>(node: Shared<'a, Inner>) -> &'a Data<C> {
     assert!(
         nf(node).contains(NodeFlags::DATA),
@@ -56,6 +71,7 @@ unsafe fn load_data<'a, C: Config>(node: Shared<'a, Inner>) -> &'a Data<C> {
         .expect("A null pointer with data flag found")
 }
 
+/// Moves a data node behind an [`Owned`] pointer, casts it and provides the correct flags.
 fn owned_data<C: Config>(data: Data<C>) -> Owned<Inner> {
     unsafe {
         Owned::<Inner>::from_raw(Box::into_raw(Box::new(data)) as usize as *mut _)
@@ -63,38 +79,20 @@ fn owned_data<C: Config>(data: Data<C>) -> Owned<Inner> {
     }
 }
 
+/// Type-casts and drops the node as data.
 unsafe fn drop_data<C: Config>(ptr: Shared<Inner>) {
+    assert!(
+        nf(ptr).contains(NodeFlags::DATA),
+        "Tried to drop data from inner node pointer"
+    );
     drop(Owned::from_raw(ptr.as_raw() as usize as *mut Data<C>));
 }
 
+/// An inner branching node of the trie.
+///
+/// This is just a bunch of pointers to lower levels.
 #[derive(Default)]
 struct Inner([Atomic<Inner>; LEVEL_CELLS]);
-
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
-pub struct Leaf<K, V> {
-    data: (K, V),
-}
-
-impl<K, V> Leaf<K, V> {
-    pub fn new(key: K, value: V) -> Self {
-        Self { data: (key, value) }
-    }
-
-    pub fn key(&self) -> &K {
-        &self.data.0
-    }
-
-    pub fn value(&self) -> &V {
-        &self.data.1
-    }
-}
-
-impl<K, V> Deref for Leaf<K, V> {
-    type Target = (K, V);
-    fn deref(&self) -> &(K, V) {
-        &self.data
-    }
-}
 
 // Instead of distinguishing the very common case of single leaf and collision list in our code, we
 // just handle everything as a list, possibly with 1 element.
@@ -162,6 +160,27 @@ enum PruneResult {
     CasFail,
 }
 
+/// The raw hash trie data structure.
+///
+/// This provides the low level data structure. It does provide the lock-free operations on some
+/// values. On the other hand, it does not provide user friendly interface. It is designed to
+/// separate the single implementation of the core algorithm and provide a way to wrap it into
+/// different interfaces for different use cases.
+///
+/// It, however, can be used to fulfill some less common uses.
+///
+/// The types stored inside and general behaviour is described by the [`Config`] type parameter and
+/// can be customized using that.
+///
+/// As a general rule, this data structure takes the [`crossbeam_epoch`] [`Guard`] and returns
+/// borrowed data whenever appropriate. This allows cheaper manipulation if necessary or grouping
+/// multiple operations together. Note than even methods that would return owned values in
+/// single-threaded case (eg. [`insert`][Raw::insert] and [`remove`][Raw::remove] return borrowed
+/// values. This is because in concurrent situation some other thread might still be accessing
+/// them. They are scheduled for destruction once the epoch ends.
+///
+/// For details of the internal implementation and correctness arguments, see the comments in
+/// source code (they probably don't belong into API documentation).
 pub struct Raw<C: Config, S> {
     hash_builder: S,
     root: Atomic<Inner>,
@@ -173,6 +192,7 @@ where
     C: Config,
     S: BuildHasher,
 {
+    /// Constructs an empty instance from the given hasher.
     pub fn with_hasher(hash_builder: S) -> Self {
         // Note: on any sane system, these assertions should actually never ever trigger no matter
         // what the user of the crate does. This is *internal* sanity check. If you ever find a
@@ -192,6 +212,7 @@ where
         }
     }
 
+    /// Computes a hash (using the stored hasher) of a key.
     fn hash<Q>(&self, key: &Q) -> u64
     where
         Q: ?Sized + Hash,
@@ -201,6 +222,7 @@ where
         hasher.finish()
     }
 
+    /// Inserts a new value, replacing and returning any previously held value.
     pub fn insert<'s, 'p, 'r>(
         &'s self,
         payload: C::Payload,
@@ -319,6 +341,8 @@ where
         }
     }
 
+    /// Inner implementation of traversing the tree, creating missing branches and doing
+    /// *something* at the leaf.
     fn traverse<'s, 'p, 'r, F>(
         &'s self,
         mut state: TraverseState<C, F>,
@@ -456,6 +480,7 @@ where
         }
     }
 
+    /// Looks up a value.
     pub fn get<'r, 's, 'p, Q>(&'s self, key: &Q, pin: &'p Guard) -> Option<&'r C::Payload>
     where
         's: 'r,
@@ -483,6 +508,9 @@ where
         }
     }
 
+    /// Looks up a value or create (and insert) a new one.
+    ///
+    /// Either way, returns the value.
     pub fn get_or_insert_with<'s, 'p, 'r, F>(
         &'s self,
         key: C::Key,
@@ -502,6 +530,7 @@ where
             .expect("Should have created one for me")
     }
 
+    /// Removes a value identified by the key from the trie, returning it if it was found.
     pub fn remove<'r, 's, 'p, Q>(&'s self, key: &Q, pin: &'p Guard) -> Option<&'r C::Payload>
     where
         's: 'r,
@@ -620,6 +649,7 @@ where
         deleted
     }
 
+    /// Checks for emptiness.
     pub fn is_empty(&self) -> bool {
         // This relies on proper branch pruning.
         // We can use the unprotected here, because we are not actually interested in where the
@@ -869,5 +899,3 @@ pub(crate) mod tests {
         // up later on. And we can't contract it as the one below is inner node, not data node.
     }
 }
-
-// TODO: Tests for correct dropping of values. And maybe add some canary values during tests?

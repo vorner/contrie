@@ -51,7 +51,7 @@ macro_rules! typed_bench {
                 lookup_n(10_000_000, bencher);
             }
         }
-    }
+    };
 }
 
 typed_bench!(hash_map, std::collections::HashMap<usize, usize>);

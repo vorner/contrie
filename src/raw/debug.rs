@@ -1,3 +1,8 @@
+//! A module containing few debug utilities.
+//!
+//! In general, they are meant for debugging the *trie itself*, but it is exposed as potentially
+//! useful.
+
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::sync::atomic::Ordering;
 
@@ -12,6 +17,11 @@ where
 {
     // Hack: &mut to make sure it is not shared between threads and nobody is modifying the thing
     // right now.
+    /// Panics if the trie is not in consistent state and pruned well.
+    ///
+    /// Note that if the caller can get the mutable reference, it should be in pruned state, even
+    /// though during modifications there might be temporary states which are not pruned. Due to
+    /// unique access to it, other threads might not be modifying it at the moment.
     #[cfg(test)]
     pub(crate) fn assert_pruned(&mut self) {
         fn handle_ptr<C: Config>(ptr: &Atomic<Inner>, data_cnt: &mut usize, seen_inner: &mut bool) {
@@ -86,6 +96,10 @@ where
     }
 }
 
+/// A pretty-printing wrapper around the raw trie.
+///
+/// The structure, including the pointers and flags, is printed if this is used to wrap the raw
+/// trie.
 pub struct PrintShape<'a, C, S>(pub &'a Raw<C, S>)
 where
     C: Config;

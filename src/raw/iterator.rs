@@ -34,6 +34,19 @@ struct Level<'a> {
 // For the same technical reasons, we do the extend_lifetime thing. It would be great if someone
 // knew a better trick ‒ while this is probably correct, something the compiler could check would
 // be much better.
+
+/// An iterator-like structure for the raw trie.
+///
+/// This wraps the map and provides borrowed instances of the payloads. Note that due to the
+/// borrowing from the iterator itself, it is not possible to create the true `Iterator`. As this
+/// is used to implement the iterators of the wrapper convenience types, this is not considered a
+/// serious limitation.
+///
+/// # Quirks
+///
+/// As noted in the crate-level documentation, changes to the content of the map done during the
+/// lifetime of the iterator (both in the current thread and other threads) may or may not be
+/// reflected in the returned values.
 pub struct Iter<'a, C, S>
 where
     C: Config,
@@ -47,6 +60,7 @@ impl<'a, C, S> Iter<'a, C, S>
 where
     C: Config,
 {
+    /// Creates a new iterator, borrowing from the map.
     pub fn new<'m: 'a>(map: &'m Raw<C, S>) -> Self {
         let mut levels = ArrayVec::new();
         let pin = crossbeam_epoch::pin();
@@ -61,6 +75,8 @@ where
     }
 
     // Not an iterator because this borrows out of the iterator itself (and effectively its pin).
+    /// Produces another value, just like `Iterator::next`, except the value is bound to the
+    /// lifetime of the iterator structure.
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<&C::Payload> {
         loop {
