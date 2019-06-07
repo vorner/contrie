@@ -1,8 +1,8 @@
 //! The core implementation of the concurrent trie data structure.
 //!
-//! This module contains the [`Raw`] type, which is the engine of all the data structures in this
-//! crate. This is exposed to allow wrapping it into further APIs, but is probably not the best
-//! thing for general use.
+//! This module contains the [`Raw`][crate::raw::Raw] type, which is the engine of all the data
+//! structures in this crate. This is exposed to allow wrapping it into further APIs, but is
+//! probably not the best thing for general use.
 
 use std::borrow::Borrow;
 use std::hash::{BuildHasher, Hash, Hasher};
