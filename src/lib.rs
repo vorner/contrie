@@ -40,6 +40,8 @@
 //! * Iteration doesn't take a snapshot at a given time. In other words, if the data structure is
 //!   modified during the iteration (even if by the same thread that iterates), the changes may or
 //!   may not be reflected in the list of iterated elements.
+//! * Iteration pins an epoch for the whole time it iterates, possibly delaying releasing some
+//!   memory. Therefore, it is advised not to hold onto iterators for extended periods of time.
 //!
 //! # The gist of the data structure
 //!

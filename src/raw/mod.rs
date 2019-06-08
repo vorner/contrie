@@ -5,6 +5,166 @@
 //! structures in this crate. This is exposed to allow wrapping it into further APIs, but is
 //! probably not the best thing for general use.
 
+// # The data structure
+//
+// The data structure is inspired by the [article], however severely simplified. Compared to the
+// article, what we don't do (if you don't want to read the article, that's fine, explanation is
+// below):
+//
+// * We don't have variable-sized inner nodes. This wastes some more space, but also allows us to
+//   keep the same node around instead of creating a new one every time we want to add or remove a
+//   pointer.
+// * We don't do snapshots for iterations.
+// * We got rid of the I-nodes. This gets rid of half of the pointer loads on the way to the
+//   element, so in theory it should make the data structure about twice faster.
+//
+// By this simplification, we lose the ability of having consistent iterations and we use somewhat
+// more memory, but get faster data structure. More importantly, the data structure is simpler to
+// implement and simpler to prove correct which makes it more likely to actually trust it with some
+// data.
+//
+// ## How it works
+//
+// The heart of the data structure is a trie where keys are prefixes of the 64bit hash of the key.
+// Each inner node has 16 pointer slots, indexed by the next 4 bits of the hash. When we reach a
+// level where the prefix is unique, we stop (we don't have all 16 levels of inner nodes if we
+// don't have to) and place a data node.
+//
+// A data nodes contain one or more elements (more in case we get a hash collision on the whole
+// hash ‒ in that case, we store all the colliding elements in an array and distinguish by equality
+// of the keys in a linear search through the array).
+//
+// On lookup, we either find the correct element or stop at the first null pointer encountered.
+//
+// On insertion, if we find a null pointer, we atomically replace that pointer to a new data node
+// containing (only) the new element, using the CaS operation. In case we reach a collision or
+// replace an existing element, we create a new data node and replace the pointer, again using the
+// CaS operation. If we find a non-matching data node in our way, we need to insert another level ‒
+// we create a brand new inner node, link the old node there and again, replace the pointer (then
+// retry with our insertion on the next level).
+//
+// Deletion looks up the element and either replaces the pointer to the data node with null (if it
+// was the last one), or creates a new data node without the element.
+//
+// ## Pruning
+//
+// If implemented as above, the data structure would work. However, deletions would leave unneeded
+// dead branches or branches that don't branch (eg. linear ones) behind. That would make the data
+// structure perform worse than necessary, because the lookups would have to traverse the dead or
+// non-branching branches and it would need more memory. Therefore, after we remove an element, we
+// want to walk the path back towards the root and remove the nodes that are no longer needed
+// (either remove the branch completely or contract the end that doesn't branch).
+//
+// If we, however, started to simply delete the nodes and replace the pointers with nulls, we would
+// get race conditions:
+//
+// 1. We check that the current node is empty (or has only one pointer to data in it) and therefore
+//    is unneeded.
+// 2. After we do the check but before we manage to update the pointer that points to the current
+//    node, some other thread adds a new pointer into the node. This would make it ineligible for
+//    deletion, but we've already done our check.
+// 3. We don't know about the addition from the other thread and go ahead with the deletion. This
+//    loses and leaks the added element, or any update the other thread has done.
+//
+// The original article used the I-nodes and another kind of nodes to solve this problem. We are
+// going to get inspired by what they did, but will do it inline in the array of pointers.
+//
+// On any sane system, data structures like our inner or data nodes are aligned to multiples of
+// some number (assuming we have at least 32bit system, it's at least multiple of 4 bytes). This
+// leaves two bits that are always 0 in the pointers. We can abuse these bits to store additional
+// flags (we use the utilities of crossbeam_utils to manage the bits). One of these bits, when set
+// to 1, will mean that the pointer is no longer allowed to be updated.
+//
+// So, when removing, we first check once if the inner node may be removed. If not, we're done. If
+// it looks like it may be, we walk the pointers again, but this time we atomically read and mark
+// them with the flag. This'll make sure nobody is allowed to sneak an update to it past our second
+// check (the first one is just an optimisation). So, if we pass the second check, we can safely
+// proceed and remove the node. Hurray. We can move one level up towards the root and repeat.
+//
+// In case the second check failed, we have already marked all the pointers that they are never
+// ever allowed to be updated again. We can't leave a node like that in the data structure forever.
+// Therefore, we create a new copy of the node, with clean pointers and replace the node with that
+// (in that case we can stop the processing at this level).
+//
+// So, what the other thread that wants to update the pointer but can't because it is marked does?
+// It can't wait for the thread that did the marking to finish its job, because then the algorithm
+// would no longer be lock-free. But it can decide to do its work for it and also do the pruning
+// (only of this particular one inner node; it won't walk further towards the root). It proceeds to
+// the second check stage ‒ marks all the pointers (even if they are already marked) and deciding
+// if it can remove it completely or if it needs to create a brand new copy. One of the threads
+// competing for the prune operation will succeed, the other will fail during the CaS update of the
+// parent pointer, but both can proceed because the pruning already happened.
+//
+// As this collision on node being prune is likely to be rare in practice and it is already
+// relatively complex (and hard to test for) situation, the other thread simply completely restarts
+// the operation instead of trying to get all the corner cases right. The removal thread, however,
+// proceeds towards the root even in the collision situation ‒ it is responsible for pruning as far
+// as possible and when going up, the corner cases don't actually happen (well, with the exception
+// of its whole branch being already removed or contracted away by another removal, but in that
+// case it'll just waste a little bit of effort in trying to remove stuff in places that are going
+// to be thrown away anyway ‒ but thanks to crossbeam_epoch, it is still valid memory).
+//
+// ## Iteration
+//
+// Similar to lookups, iteration doesn't have to care about the flags about non-updateable
+// pointers ‒ even the old, marked, pointers form a valid representation of the map at a certain
+// point of time, though not necessarily optimally small.
+//
+// Therefore, the iterator simply keeps a stack of nodes it is in, with indices into either the
+// pointer array or the array of elements in a data node and does a DFS through the data structure.
+//
+// # Safety
+//
+// The current module contains a lot of unsafe code. In general, there are two kinds of things that
+// could go wrong. Well, in addition to coding bugs, of course.
+//
+// ## Lifetimes & invalid pointers
+//
+// First, we simply never insert pointers that would be invalid at that time into the data
+// structure ‒ whatever gets inserted is just brand new allocated thing. This boils down to just
+// being careful and, as this is relatively short code, this is possible to accomplish.
+//
+// So, we must make sure nothing gets destroyed too soon. To accomplish this, we use the mechanism
+// of crossbeam_epoch. When we remove something from the data structure, the destruction is
+// postponed to when all the threads leave the current epoch. We never hold onto the pointers or
+// references past the current method and we bind the lifetimes of the references to the lifetime
+// of passed pin and us.
+//
+// There are two exceptions to this:
+//
+// * The destructor deletes things right away. But as it holds a mutable reference, we can't be
+//   destroying anything for any other thread ‒ the other thread no longer holds reference to us.
+// * The iterator binds the lifetimes to both itself and the map, but it holds a pin alive, so the
+//   same would still apply.
+//
+// ## Inter-thread synchronization of data.
+//
+// In general, we use release ordering when putting data into the map and consume ordering when
+// reading it out of it. The claim is, this is enough. But as the elements are independent on each
+// other and only the inner nodes we traverse during the operation play any role to us (and we
+// access the further nodes through the loaded pointers) and there's exactly one path from the root
+// to each element (therefore anyone getting the element must have touched the same pointers), this
+// is basically the definition of how release/consume synchronization edges work.
+//
+// There are some other orderings through the code, though:
+//
+// * Relaxed in case we *fail* a CaS update. However, in such case nothing is modified and we just
+//   throw the data we've created ourselves out, so there's nothing to synchronize.
+// * Relaxed in the first check for pruning. This one does not look at the actual data behind the
+//   pointers, it simply counts how many pointers are non-null. The second pass does the actual
+//   proper synchronization.
+// * Relaxed in the is_empty. As we don't care what data it points to (only that it's not null),
+//   this again doesn't have to synchronize anything.
+// * Relaxed in the destructor. As argued above (and at the destructor itself), we have gained a
+//   unique access to the whole map. Therefore, the whole map, containing the data in it must have
+//   been properly synchronized into the thread already and we are in a single-threaded scenario.
+// * AcqRel in the pruning. This is because we need to acquire the data pointed to in the case
+//   we'll be making a copy and we'll have to re-release it later on. We also modify the value of
+//   the pointer (with the flag), therefore anyone reading it after us only synchronizes against
+//   us, so we also need to re-release it right now onto that pointer.
+//
+// [article]: https://www.researchgate.net/publication/221643801_Concurrent_Tries_with_Efficient_Non-Blocking_Snapshots
+
 use std::borrow::Borrow;
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::marker::PhantomData;
@@ -366,7 +526,12 @@ where
             let replace = |with: Owned<Inner>, delete_previous| {
                 // If we fail to set it, the `with` is dropped together with the Err case, freeing
                 // whatever was inside it.
-                let result = current.compare_and_set_weak(node, with, Ordering::Release, pin);
+                let result = current.compare_and_set_weak(
+                    node,
+                    with,
+                    (Ordering::Release, Ordering::Relaxed),
+                    pin,
+                );
                 match result {
                     Ok(new) if !node.is_null() && delete_previous => {
                         assert!(flags.contains(NodeFlags::DATA));
@@ -547,7 +712,12 @@ where
             let node = current.load_consume(&pin);
             let flags = nf(node);
             let replace = |with: Shared<_>| {
-                let result = current.compare_and_set_weak(node, with, Ordering::Release, &pin);
+                let result = current.compare_and_set_weak(
+                    node,
+                    with,
+                    (Ordering::Release, Ordering::Relaxed),
+                    &pin,
+                );
                 match result {
                     Ok(_) => {
                         assert!(flags.contains(NodeFlags::DATA));
