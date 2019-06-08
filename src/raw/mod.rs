@@ -851,9 +851,6 @@ impl<C: Config, S> Drop for Raw<C, S> {
          * * Similarly, the Relaxed ordering here is fine too, as the whole data structure must
          *   have been synchronized into our thread already by this time.
          * * The pointer inside this data structure is never dangling.
-         *
-         * TODO: Is this true? Could we not have a pin in the same thread, etc, etc… check that it
-         * doesn't compile (and make a test for that).
          */
         unsafe fn drop_recursive<C: Config>(node: &Atomic<Inner>) {
             let pin = crossbeam_epoch::unprotected();

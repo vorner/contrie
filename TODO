@@ -13,4 +13,3 @@
 * Manually implement further traits for ExistingOrNew
   - Like Display, Hex, etc…
 * Is the deref on ExistingOrNew an abuse?
-* Tests for !Send & !Sync things ‒ make sure they make the whole map not Send and Sync as well
