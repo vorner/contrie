@@ -1,5 +1,8 @@
+//! The [`ConMap`][crate::ConMap] type and its helpers.
+
 use std::borrow::Borrow;
 use std::collections::hash_map::RandomState;
+use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::hash::{BuildHasher, Hash};
 use std::iter::FromIterator;
 use std::marker::PhantomData;
@@ -12,18 +15,18 @@ use crate::raw::{self, Raw};
 // :-( It would be nice if we could provide deref to (K, V). But that is incompatible with unsized
 // values.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
-pub struct Node<K, V: ?Sized> {
+pub struct Element<K, V: ?Sized> {
     key: K,
     value: V,
 }
 
-impl<K, V> Node<K, V> {
+impl<K, V> Element<K, V> {
     pub fn new(key: K, value: V) -> Self {
         Self { key, value }
     }
 }
 
-impl<K, V: ?Sized> Node<K, V> {
+impl<K, V: ?Sized> Element<K, V> {
     pub fn key(&self) -> &K {
         &self.key
     }
@@ -33,7 +36,7 @@ impl<K, V: ?Sized> Node<K, V> {
     }
 }
 
-struct MapPayload<K, V: ?Sized>(Arc<Node<K, V>>);
+struct MapPayload<K, V: ?Sized>(Arc<Element<K, V>>);
 
 impl<K, V: ?Sized> Clone for MapPayload<K, V> {
     fn clone(&self) -> Self {
@@ -69,17 +72,70 @@ where
 
 impl<'a, K, V, S> Iterator for Iter<'a, K, V, S>
 where
-    // TODO: It would be great if the bounds wouldn't have to be on the struct, only on the impls
     K: Hash + Eq,
     V: ?Sized,
 {
-    type Item = Arc<Node<K, V>>;
-    fn next(&mut self) -> Option<Arc<Node<K, V>>> {
+    type Item = Arc<Element<K, V>>;
+    fn next(&mut self) -> Option<Arc<Element<K, V>>> {
         self.inner.next().map(|p| Arc::clone(&p.0))
     }
 }
 
 // TODO: Bunch of derives? Which ones? And which one do we need to implement?
+/// A concurrent map.
+///
+/// This flavour stores the data as [`Arc<Element<K, V>>`][Element]. This allows returning handles
+/// to the held values cheaply even if the data is larger or impossible to clone. This has several
+/// consequences:
+///
+/// * It is sometimes less convenient to use.
+/// * It allows the values to be `?Sized` ‒ you can store trait objects or slices as the values
+///   (not the keys).
+/// * Entries can be shared between multiple maps.
+/// * Cloning of the map doesn't clone the data, it will point to the same objects.
+/// * There's another indirection in play.
+///
+/// Iteration returns (cloned) handles to the elements. The [`FromIterator`] and [`Extend`] traits
+/// accept both tuples and element handles. Furthermore, the [`Extend`] is also implemented for
+/// shared references (to allow extending the same map concurrently from multiple threads).
+///
+/// TODO: Support for rayon iterators/extend.
+///
+/// If this is not suitable, the [`CloneConMap`] can be used instead (TODO: Implement it).
+///
+/// # Examples
+///
+/// ```rust
+/// use contrie::ConMap;
+/// use crossbeam_utils::thread;
+///
+/// let map = ConMap::new();
+///
+/// thread::scope(|s| {
+///     s.spawn(|_| {
+///         map.insert("hello", 1);
+///     });
+///     s.spawn(|_| {
+///         map.insert("world", 2);
+///     });
+/// }).unwrap();
+/// assert_eq!(1, *map.get("hello").unwrap().value());
+/// assert_eq!(2, *map.get("world").unwrap().value());
+/// ```
+///
+/// ```rust
+/// use std::sync::Arc;
+/// use contrie::map::{ConMap, Element};
+/// let map_1: ConMap<usize, [usize]> = ConMap::new();
+///
+/// map_1.insert_element(Arc::new(Element::new(42, [1, 2, 3])));
+/// map_1.insert_element(Arc::new(Element::new(43, [1, 2, 3, 4])));
+///
+/// assert_eq!(3, map_1.get(&42).unwrap().value().len());
+///
+/// let map_2 = ConMap::new();
+/// map_2.insert_element(map_1.get(&43).unwrap());
+/// ```
 pub struct ConMap<K, V, S = RandomState>
 where
     // TODO: It would be great if the bounds wouldn't have to be on the struct, only on the impls
@@ -94,6 +150,7 @@ where
     K: Hash + Eq,
     V: ?Sized,
 {
+    /// Creates a new empty map.
     pub fn new() -> Self {
         Self::with_hasher(RandomState::default())
     }
@@ -105,25 +162,47 @@ where
     K: Hash + Eq,
     S: BuildHasher,
 {
-    pub fn insert(&self, key: K, value: V) -> Option<Arc<Node<K, V>>> {
-        self.insert_node(Arc::new(Node::new(key, value)))
+    /// Inserts a new element.
+    ///
+    /// Any previous element with the same key is replaced and returned.
+    pub fn insert(&self, key: K, value: V) -> Option<Arc<Element<K, V>>> {
+        self.insert_element(Arc::new(Element::new(key, value)))
     }
 
-    pub fn get_or_insert_with<F>(&self, key: K, create: F) -> ExistingOrNew<Arc<Node<K, V>>>
-    where
-        F: FnOnce() -> V,
-    {
-        self.get_or_insert_with_node(key, |key| {
-            let value = create();
-            Arc::new(Node::new(key, value))
-        })
-    }
-
-    pub fn get_or_insert(&self, key: K, value: V) -> ExistingOrNew<Arc<Node<K, V>>> {
+    /// Looks up or inserts an element.
+    ///
+    /// It looks up an element. If it isn't present, the provided one is inserted instead. Either
+    /// way, an element is returned.
+    pub fn get_or_insert(&self, key: K, value: V) -> ExistingOrNew<Arc<Element<K, V>>> {
         self.get_or_insert_with(key, || value)
     }
 
-    pub fn get_or_insert_default(&self, key: K) -> ExistingOrNew<Arc<Node<K, V>>>
+    /// Looks up or inserts a newly created element.
+    ///
+    /// It looks up an element. If it isn't present, the provided closure is used to create a new
+    /// one insert it. Either way, an element is returned.
+    ///
+    /// # Quirks
+    ///
+    /// Due to races in case of concurrent accesses, the closure may be called even if the value is
+    /// not subsequently inserted and an existing element is returned. This should be relatively
+    /// rare (another thread must insert the new element between this method observes an empty slot
+    /// and manages to insert the new element).
+    pub fn get_or_insert_with<F>(&self, key: K, create: F) -> ExistingOrNew<Arc<Element<K, V>>>
+    where
+        F: FnOnce() -> V,
+    {
+        self.get_or_insert_with_element(key, |key| {
+            let value = create();
+            Arc::new(Element::new(key, value))
+        })
+    }
+
+    /// Looks up or inserts a default value of an element.
+    ///
+    /// This is like [get_or_insert_with][ConMap::get_or_insert_with], but a default value is used
+    /// instead of manually providing a closure.
+    pub fn get_or_insert_default(&self, key: K) -> ExistingOrNew<Arc<Element<K, V>>>
     where
         V: Default,
     {
@@ -137,22 +216,41 @@ where
     V: ?Sized,
     S: BuildHasher,
 {
+    /// Creates a new empty map, but with the provided hasher implementation.
     pub fn with_hasher(hasher: S) -> Self {
         Self {
             raw: Raw::with_hasher(hasher),
         }
     }
 
-    pub fn insert_node(&self, node: Arc<Node<K, V>>) -> Option<Arc<Node<K, V>>> {
+    /// Inserts a new element.
+    ///
+    /// This acts the same as [insert][ConMap::insert], but takes the already created element. It
+    /// can be used when:
+    ///
+    /// * `V: ?Sized`.
+    /// * You want to insert the same element into multiple maps.
+    pub fn insert_element(&self, element: Arc<Element<K, V>>) -> Option<Arc<Element<K, V>>> {
         let pin = crossbeam_epoch::pin();
         self.raw
-            .insert(MapPayload(node), &pin)
+            .insert(MapPayload(element), &pin)
             .map(|p| Arc::clone(&p.0))
     }
 
-    pub fn get_or_insert_with_node<F>(&self, key: K, create: F) -> ExistingOrNew<Arc<Node<K, V>>>
+    /// Looks up or inserts a new element.
+    ///
+    /// This is the same as [get_or_insert_with][ConMap::get_or_insert_with], but the closure
+    /// returns a pre-created element. This can be used when:
+    ///
+    /// * `V: ?Sized`.
+    /// * You want to insert the same element into multiple maps.
+    pub fn get_or_insert_with_element<F>(
+        &self,
+        key: K,
+        create: F,
+    ) -> ExistingOrNew<Arc<Element<K, V>>>
     where
-        F: FnOnce(K) -> Arc<Node<K, V>>,
+        F: FnOnce(K) -> Arc<Element<K, V>>,
     {
         let pin = crossbeam_epoch::pin();
         self.raw
@@ -160,7 +258,8 @@ where
             .map(|payload| Arc::clone(&payload.0))
     }
 
-    pub fn get<Q>(&self, key: &Q) -> Option<Arc<Node<K, V>>>
+    /// Looks up an element.
+    pub fn get<Q>(&self, key: &Q) -> Option<Arc<Element<K, V>>>
     where
         Q: ?Sized + Eq + Hash,
         K: Borrow<Q>,
@@ -169,7 +268,8 @@ where
         self.raw.get(key, &pin).map(|r| Arc::clone(&r.0))
     }
 
-    pub fn remove<Q>(&self, key: &Q) -> Option<Arc<Node<K, V>>>
+    /// Removes an element identified by the given key, returning it.
+    pub fn remove<Q>(&self, key: &Q) -> Option<Arc<Element<K, V>>>
     where
         Q: ?Sized + Eq + Hash,
         K: Borrow<Q>,
@@ -177,11 +277,22 @@ where
         let pin = crossbeam_epoch::pin();
         self.raw.remove(key, &pin).map(|r| Arc::clone(&r.0))
     }
+}
 
+impl<K, V, S> ConMap<K, V, S>
+where
+    K: Hash + Eq,
+    V: ?Sized,
+{
+    /// Checks if the map is currently empty.
+    ///
+    /// Note that due to the nature of concurrent map, this is inherently racy ‒ another thread may
+    /// add or remove elements between you call this method and act based on the result.
     pub fn is_empty(&self) -> bool {
         self.raw.is_empty()
     }
 
+    /// Returns an iterator through the elements of the map.
     pub fn iter(&self) -> Iter<K, V, S> {
         Iter {
             inner: raw::iterator::Iter::new(&self.raw),
@@ -199,20 +310,49 @@ where
     }
 }
 
+impl<K, V, S> Debug for ConMap<K, V, S>
+where
+    K: Debug + Hash + Eq,
+    // TODO: Why doesn't the std allow the entry to take unsized types?
+    V: Debug,
+{
+    fn fmt(&self, fmt: &mut Formatter) -> FmtResult {
+        let mut d = fmt.debug_map();
+        // TODO: As we return Arcs, it seem we can't use the iterator approach with .map :-(
+        for n in self {
+            d.entry(n.key(), n.value());
+        }
+        d.finish()
+    }
+}
+
+impl<K, V, S> Clone for ConMap<K, V, S>
+where
+    K: Hash + Eq,
+    V: ?Sized,
+    S: Clone + BuildHasher,
+{
+    fn clone(&self) -> Self {
+        let builder = self.raw.hash_builder().clone();
+        let mut new = Self::with_hasher(builder);
+        new.extend(self);
+        new
+    }
+}
+
 impl<'a, K, V, S> IntoIterator for &'a ConMap<K, V, S>
 where
     K: Hash + Eq,
     V: ?Sized,
-    S: BuildHasher,
 {
-    type Item = Arc<Node<K, V>>;
+    type Item = Arc<Element<K, V>>;
     type IntoIter = Iter<'a, K, V, S>;
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
     }
 }
 
-impl<'a, K, V, S> Extend<Arc<Node<K, V>>> for &'a ConMap<K, V, S>
+impl<'a, K, V, S> Extend<Arc<Element<K, V>>> for &'a ConMap<K, V, S>
 where
     K: Hash + Eq,
     V: ?Sized,
@@ -220,10 +360,10 @@ where
 {
     fn extend<T>(&mut self, iter: T)
     where
-        T: IntoIterator<Item = Arc<Node<K, V>>>,
+        T: IntoIterator<Item = Arc<Element<K, V>>>,
     {
         for n in iter {
-            self.insert_node(n);
+            self.insert_element(n);
         }
     }
 }
@@ -237,11 +377,11 @@ where
     where
         T: IntoIterator<Item = (K, V)>,
     {
-        self.extend(iter.into_iter().map(|(k, v)| Arc::new(Node::new(k, v))));
+        self.extend(iter.into_iter().map(|(k, v)| Arc::new(Element::new(k, v))));
     }
 }
 
-impl<K, V, S> Extend<Arc<Node<K, V>>> for ConMap<K, V, S>
+impl<K, V, S> Extend<Arc<Element<K, V>>> for ConMap<K, V, S>
 where
     K: Hash + Eq,
     V: ?Sized,
@@ -249,7 +389,7 @@ where
 {
     fn extend<T>(&mut self, iter: T)
     where
-        T: IntoIterator<Item = Arc<Node<K, V>>>,
+        T: IntoIterator<Item = Arc<Element<K, V>>>,
     {
         let mut me: &ConMap<_, _, _> = self;
         me.extend(iter);
@@ -270,14 +410,14 @@ where
     }
 }
 
-impl<K, V> FromIterator<Arc<Node<K, V>>> for ConMap<K, V>
+impl<K, V> FromIterator<Arc<Element<K, V>>> for ConMap<K, V>
 where
     K: Hash + Eq,
     V: ?Sized,
 {
     fn from_iter<T>(iter: T) -> Self
     where
-        T: IntoIterator<Item = Arc<Node<K, V>>>,
+        T: IntoIterator<Item = Arc<Element<K, V>>>,
     {
         let mut me = ConMap::new();
         me.extend(iter);
@@ -330,7 +470,7 @@ mod tests {
         assert!(map.insert("hello", "world").is_none());
         assert!(map.get("world").is_none());
         let found = map.get("hello").unwrap();
-        assert_eq!(Node::new("hello", "world"), *found);
+        assert_eq!(Element::new("hello", "world"), *found);
     }
 
     #[test]
@@ -338,9 +478,9 @@ mod tests {
         let map = ConMap::new();
         assert!(map.insert("hello", "world").is_none());
         let old = map.insert("hello", "universe").unwrap();
-        assert_eq!(Node::new("hello", "world"), *old);
+        assert_eq!(Element::new("hello", "world"), *old);
         let found = map.get("hello").unwrap();
-        assert_eq!(Node::new("hello", "universe"), *found);
+        assert_eq!(Element::new("hello", "universe"), *found);
     }
 
     // Insert a lot of things, to make sure we have multiple levels.
@@ -549,13 +689,13 @@ mod tests {
     fn unsized_values() {
         let map: ConMap<usize, [usize]> = ConMap::new();
         assert!(map
-            .insert_node(Arc::new(Node::new(42, [1, 2, 3])))
+            .insert_element(Arc::new(Element::new(42, [1, 2, 3])))
             .is_none());
         let found = map.get(&42).unwrap();
         assert_eq!(&[1, 2, 3], found.value());
-        let inserted = map.get_or_insert_with_node(0, |k| {
+        let inserted = map.get_or_insert_with_element(0, |k| {
             assert_eq!(0, k);
-            Arc::new(Node::new(k, []))
+            Arc::new(Element::new(k, []))
         });
         assert_eq!(0, *inserted.key());
         assert!(inserted.value().is_empty());

@@ -50,6 +50,26 @@
 //! For further technical details, arguments of correctness and similar, see the source code and
 //! comments in there, especially the [`raw`] module.
 //!
+//! # Examples
+//!
+//! ```rust
+//! use contrie::ConMap;
+//! use crossbeam_utils::thread;
+//!
+//! let map = ConMap::new();
+//!
+//! thread::scope(|s| {
+//!     s.spawn(|_| {
+//!         map.insert(1, 2);
+//!     });
+//!     s.spawn(|_| {
+//!         map.insert(2, 3);
+//!     });
+//! }).unwrap();
+//!
+//! assert_eq!(3, *map.get(&2).unwrap().value());
+//! ```
+//!
 //! [wait-free]: https://en.wikipedia.org/wiki/Non-blocking_algorithm#Wait-freedom
 //! [lock-free]: https://en.wikipedia.org/wiki/Non-blocking_algorithm#Lock-freedom
 //! [crossbeam-epoch]: https://docs.rs/crossbeam-epoch
