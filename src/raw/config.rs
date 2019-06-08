@@ -1,3 +1,5 @@
+//! The [`Config`][crate::raw::config::Config] trait for specifying behaviour of
+//! [`Raw`][crate::raw::Raw].
 use std::borrow::Borrow;
 use std::hash::Hash;
 use std::marker::PhantomData;

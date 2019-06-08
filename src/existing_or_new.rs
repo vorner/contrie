@@ -9,7 +9,9 @@ use std::ops::{Deref, DerefMut};
 /// Otherwise it can also be extracted.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum ExistingOrNew<T> {
+    /// The entry already existed.
     Existing(T),
+    /// A new entry had to be inserted to satisfy the request.
     New(T),
 }
 

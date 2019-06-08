@@ -1,3 +1,4 @@
+#![allow(unsafe_code)]
 //! The core implementation of the concurrent trie data structure.
 //!
 //! This module contains the [`Raw`][crate::raw::Raw] type, which is the engine of all the data

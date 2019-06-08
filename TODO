@@ -1,5 +1,4 @@
 * Sets
-* Docs (and all the headers that require docs and deny(unsafe) in most of the modules
 * Maybe some other types (for eg. clone types instead of arcing them?)
 * Parametrize the things with specification about sequential consistency
   - So people can rely on relative order of insertions, etc.
@@ -11,8 +10,6 @@
   - Should we have our own wrapper that loads and gives some king of Option<Either<&Payload, &Inner>>?
 * Instead of smallvecs, we could use the raw allocator API, allocate a struct like { len, data: [ptr; 0] } and cast it around.
   - Boxed slice won't work, because it's a fat pointer and these don't fit well into atomics
-* A fixme around prune:
-  - Decide if we need or don't need SeqCst here
 * Manually implement further traits for ExistingOrNew
   - Like Display, Hex, etc…
 * Is the deref on ExistingOrNew an abuse?

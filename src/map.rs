@@ -14,6 +14,9 @@ use crate::raw::{self, Raw};
 
 // :-( It would be nice if we could provide deref to (K, V). But that is incompatible with unsized
 // values.
+/// An element stored inside the [`ConMap`].
+///
+/// Or, more precisely, the [`Arc`] handles to these are stored in there.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct Element<K, V: ?Sized> {
     key: K,
@@ -21,16 +24,19 @@ pub struct Element<K, V: ?Sized> {
 }
 
 impl<K, V> Element<K, V> {
+    /// Creates a new element with given key and value.
     pub fn new(key: K, value: V) -> Self {
         Self { key, value }
     }
 }
 
 impl<K, V: ?Sized> Element<K, V> {
+    /// Provides access to the key.
     pub fn key(&self) -> &K {
         &self.key
     }
 
+    /// Provides access to the value.
     pub fn value(&self) -> &V {
         &self.value
     }
@@ -61,6 +67,9 @@ where
     type Key = K;
 }
 
+/// The iterator of the [`ConMap`].
+///
+/// See the [`iter`][ConMap::iter] method for details.
 pub struct Iter<'a, K, V, S>
 where
     // TODO: It would be great if the bounds wouldn't have to be on the struct, only on the impls
@@ -101,7 +110,7 @@ where
 ///
 /// TODO: Support for rayon iterators/extend.
 ///
-/// If this is not suitable, the [`CloneConMap`] can be used instead (TODO: Implement it).
+/// If this is not suitable, the `CloneConMap` can be used instead (TODO: Implement it).
 ///
 /// # Examples
 ///

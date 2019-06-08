@@ -1,3 +1,11 @@
+#![doc(
+    html_root_url = "https://docs.rs/contrie/0.1.0/contrie/",
+    test(attr(deny(warnings)))
+)]
+// Note: we can't use forbid(unsafe_code). We do allow unsafe code in the raw submodule (but not
+// outside of it).
+#![deny(missing_docs, warnings, unsafe_code)]
+
 //! A concurrent trie.
 //!
 //! The crate provides implementation of a hash map and a hash set. Unlike the versions from the

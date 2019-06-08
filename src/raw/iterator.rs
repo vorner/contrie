@@ -1,3 +1,5 @@
+//! Iteration of the [`Raw`][crate::raw::Raw] map.
+
 use std::marker::PhantomData;
 use std::mem;
 use std::sync::atomic::Ordering;
