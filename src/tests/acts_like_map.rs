@@ -7,14 +7,16 @@
 //! Furthermore, each test is run in several instances, with keys in differently sized universe.
 //! The small ones likely generate only short hashes, but are more likely to reuse the same value.
 
+use std::collections::hash_map::RandomState;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
-use std::hash::Hash;
+use std::hash::{BuildHasher, Hash};
 
 use proptest::collection::vec;
 use proptest::prelude::*;
 use rayon::prelude::*;
 
+use crate::raw::tests::{MakeSplatHasher, NoHasher};
 use crate::ConMap;
 
 #[derive(Debug, Clone)]
@@ -39,11 +41,11 @@ where
         ]
     }
 
-    fn run(instructions: Vec<Self>) -> Result<(), TestCaseError> {
+    fn run<H: BuildHasher>(instructions: Vec<Self>, hasher: H) -> Result<(), TestCaseError> {
         use Instruction::*;
 
         let trie = ConMap::new();
-        let mut map = HashMap::new();
+        let mut map = HashMap::with_hasher(hasher);
         for ins in instructions {
             match ins {
                 Lookup(key) => {
@@ -70,11 +72,12 @@ where
     }
 }
 
-fn insert_parallel_test<T: Clone + Hash + Eq + Send + Sync>(
+fn insert_parallel_test<T: Clone + Hash + Eq + Send + Sync, H: BuildHasher + Send + Sync>(
     values: Vec<T>,
+    hasher: H,
 ) -> Result<(), TestCaseError> {
     let set: HashSet<_> = values.iter().cloned().collect();
-    let trie = ConMap::new();
+    let trie = ConMap::with_hasher(hasher);
     values.into_par_iter().for_each(|v| {
         trie.insert(v, ());
     });
@@ -89,29 +92,39 @@ fn insert_parallel_test<T: Clone + Hash + Eq + Send + Sync>(
 // collisions?
 
 proptest! {
+
     #[test]
     fn small_keys(instructions in vec(Instruction::<u8, usize>::strategy(), 1..10_000)) {
-        Instruction::run(instructions)?;
+        Instruction::run(instructions, RandomState::default())?;
+    }
+
+    #[test]
+    fn mid_keys_collisions(instructions in vec(Instruction::<u16, usize>::strategy(), 1..100)) {
+        Instruction::run(instructions, NoHasher)?;
+    }
+
+    #[test]
+    fn mid_keys_bad_hasher(instructions in vec(Instruction::<u16, usize>::strategy(), 1..1_000)) {
+        Instruction::run(instructions, MakeSplatHasher)?;
     }
 
     #[test]
     fn mid_keys(instructions in vec(Instruction::<u16, usize>::strategy(), 1..10_000)) {
-        Instruction::run(instructions)?;
+        Instruction::run(instructions, RandomState::default())?;
     }
 
     #[test]
     fn large_keys(instructions in vec(Instruction::<usize, usize>::strategy(), 1..10_000)) {
-        Instruction::run(instructions)?;
+        Instruction::run(instructions, RandomState::default())?;
     }
 
     #[test]
     fn string_keys(instructions in vec(Instruction::<String, usize>::strategy(), 1..100)) {
-        Instruction::run(instructions)?;
+        Instruction::run(instructions, RandomState::default())?;
     }
 
     // TODO: This test and following needs improvements.
-    // 1. We need actual ConSet.
-    // 2. We need iteration.
+    // We need actual ConSet.
     #[test]
     fn insert_all_large(values in vec(any::<usize>(), 1..10_000)) {
         // Make them unique
@@ -120,6 +133,9 @@ proptest! {
         for v in values {
             trie.insert(v, ());
         }
+        for v in &trie {
+            prop_assert!(set.contains(v.key()));
+        }
         for v in set {
             prop_assert!(trie.get(&v).is_some());
         }
@@ -127,16 +143,26 @@ proptest! {
 
     #[test]
     fn insert_all_small_parallel(values in vec(any::<u8>(), 1..10_000)) {
-        insert_parallel_test(values)?;
+        insert_parallel_test(values, RandomState::default())?;
     }
 
     #[test]
     fn insert_all_mid_parallel(values in vec(any::<u16>(), 1..10_000)) {
-        insert_parallel_test(values)?;
+        insert_parallel_test(values, RandomState::default())?;
+    }
+
+    #[test]
+    fn insert_all_mid_parallel_nohash(values in vec(any::<u16>(), 1..100)) {
+        insert_parallel_test(values, NoHasher)?;
+    }
+
+    #[test]
+    fn insert_all_mid_parallel_bad_hasher(values in vec(any::<u16>(), 1..1_000)) {
+        insert_parallel_test(values, MakeSplatHasher)?;
     }
 
     #[test]
     fn insert_all_large_parallel(values in vec(any::<usize>(), 1..10_000)) {
-        insert_parallel_test(values)?;
+        insert_parallel_test(values, RandomState::default())?;
     }
 }
