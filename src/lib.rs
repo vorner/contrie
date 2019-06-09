@@ -12,7 +12,7 @@
 //! standard library, these allow concurrent accesses and *modifications* from multiple threads at
 //! once, without locking. Actually, even the inner implementation is [lock-free] and the lookups
 //! are [wait-free] (though even the lookup methods may invoke collecting garbage in
-//! [`crossbeam-epoch`] which while unlikely might contain non-wait-free functions).
+//! [crossbeam-epoch] which while unlikely might contain non-wait-free functions).
 //!
 //! # Downsides
 //!
@@ -85,7 +85,7 @@
 //! [crossbeam-epoch]: https://docs.rs/crossbeam-epoch
 //! [`Arc`]: std::sync::Arc
 //! [article]: https://www.researchgate.net/publication/221643801_Concurrent_Tries_with_Efficient_Non-Blocking_Snapshots
-//! [wikipedia entry]: https://en.wikipedia.org/wiki/Ctrie
+//! [Wikipedia entry]: https://en.wikipedia.org/wiki/Ctrie
 
 mod existing_or_new;
 pub mod map;

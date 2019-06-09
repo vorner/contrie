@@ -9,7 +9,7 @@ Still in somewhat experimental state, large parts are missing and some API
 changes are to be expected (though it'll probably still stay being a concurrent
 map & set).
 
-Inspired by this [article] and [wikipedia entry], though simplified
+Inspired by this [article] and [Wikipedia entry], though simplified
 significantly (at the cost of some features).
 
 Read [the documentation](https://docs.rs/contrie) before using, there are some
@@ -32,4 +32,4 @@ license, shall be dual licensed as above, without any additional terms
 or conditions.
 
 [article]: https://www.researchgate.net/publication/221643801_Concurrent_Tries_with_Efficient_Non-Blocking_Snapshots
-[wikipedia entry]: https://en.wikipedia.org/wiki/Ctrie
+[Wikipedia entry]: https://en.wikipedia.org/wiki/Ctrie

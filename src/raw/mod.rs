@@ -7,7 +7,7 @@
 
 // # The data structure
 //
-// The data structure is inspired by the [article] and [wikipedia entry], however severely
+// The data structure is inspired by the [article] and [Wikipedia entry], however severely
 // simplified. Compared to the article, what we don't do (if you don't want to read the article,
 // that's fine, explanation is below):
 //
@@ -164,7 +164,7 @@
 //   us, so we also need to re-release it right now onto that pointer.
 //
 // [article]: https://www.researchgate.net/publication/221643801_Concurrent_Tries_with_Efficient_Non-Blocking_Snapshots
-// [wikipedia entry]: https://en.wikipedia.org/wiki/Ctrie
+// [Wikipedia entry]: https://en.wikipedia.org/wiki/Ctrie
 
 use std::borrow::Borrow;
 use std::hash::{BuildHasher, Hash, Hasher};
