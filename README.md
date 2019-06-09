@@ -5,10 +5,15 @@
 
 A concurrent hash-trie map & set.
 
-Very alpha state right now, more an experiment than anything finished. And it
-even might need a better name.
+Still in somewhat experimental state, large parts are missing and some API
+changes are to be expected (though it'll probably still stay being a concurrent
+map & set).
 
-Read [the documentation](https://docs.rs/contrie) before using.
+Inspired by this [article] and [wikipedia entry], though simplified
+significantly (at the cost of some features).
+
+Read [the documentation](https://docs.rs/contrie) before using, there are some
+quirks to be aware of.
 
 ## License
 
@@ -26,7 +31,5 @@ submitted for inclusion in the work by you, as defined in the Apache-2.0
 license, shall be dual licensed as above, without any additional terms
 or conditions.
 
-[`Arc`]: https://doc.rust-lang.org/std/sync/struct.Arc.html
-[`AtomicPtr`]: https://doc.rust-lang.org/std/sync/atomic/struct.AtomicPtr.html
-[`ArcSwap`]: https://docs.rs/arc-swap/*/arc_swap/struct.ArcSwap.html
-
+[article]: https://www.researchgate.net/publication/221643801_Concurrent_Tries_with_Efficient_Non-Blocking_Snapshots
+[wikipedia entry]: https://en.wikipedia.org/wiki/Ctrie

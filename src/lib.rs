@@ -51,11 +51,11 @@
 //! it contains only the data leaf without further intermediate levels). These pointers can be
 //! updated atomically with compare-and-swap operations.
 //!
-//! The idea was inspired by this [article], but with severe simplifications. The simplifications
-//! were done to lower the number of traversed pointers during operations and to gain more
-//! confidence in correctness of the implementation, however at the cost of the snapshots for
-//! iteration and higher memory consumption. Pruning of the trie of unneeded branches on removals
-//! was preserved.
+//! The idea was inspired by this [article] and [wikipedia entry], but with severe simplifications.
+//! The simplifications were done to lower the number of traversed pointers during operations and
+//! to gain more confidence in correctness of the implementation, however at the cost of the
+//! snapshots for iteration and higher memory consumption. Pruning of the trie of unneeded branches
+//! on removals was preserved.
 //!
 //! For further technical details, arguments of correctness and similar, see the source code and
 //! comments in there, especially the [`raw`] module.
@@ -85,6 +85,7 @@
 //! [crossbeam-epoch]: https://docs.rs/crossbeam-epoch
 //! [`Arc`]: std::sync::Arc
 //! [article]: https://www.researchgate.net/publication/221643801_Concurrent_Tries_with_Efficient_Non-Blocking_Snapshots
+//! [wikipedia entry]: https://en.wikipedia.org/wiki/Ctrie
 
 mod existing_or_new;
 pub mod map;
