@@ -13,3 +13,5 @@
 * Manually implement further traits for ExistingOrNew
   - Like Display, Hex, etc…
 * Is the deref on ExistingOrNew an abuse?
+* If the Data node was turned from an array to concurrent linked list, it should be possible to get rid of the Config::Payload: Clone bound.
+  That in turn could give us some more flexibility in designing the APIs
