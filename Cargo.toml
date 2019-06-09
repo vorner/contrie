@@ -3,7 +3,13 @@ name = "contrie"
 version = "0.1.0"
 authors = ["Michal 'vorner' Vaner <vorner@vorner.cz>"]
 edition = "2018"
-# TODO: Keywords, readmes, stuff..
+description = "Concurrent map and set"
+documentation = "https://docs.rs/contrie"
+repository = "https://github.com/vorner/contrie"
+readme = "README.md"
+keywords = ["atomic", "concurrent", "map", "set", "lock-free"]
+categories = ["concurrency", "algorithms", "data-structures"]
+license = "Apache-2.0/MIT"
 
 [dependencies]
 arrayvec = "~0.4"
