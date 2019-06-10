@@ -15,3 +15,6 @@
 * Is the deref on ExistingOrNew an abuse?
 * If the Data node was turned from an array to concurrent linked list, it should be possible to get rid of the Config::Payload: Clone bound.
   That in turn could give us some more flexibility in designing the APIs
+* BUG: Due to crossbeam-epoch, destruction of keys and values may be moved *past* the destructor of the map.
+  - Add 'static bounds as a temporary solution
+  - Explore if this can be worked around by using a separate Collector and flush it in the destructor
