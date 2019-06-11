@@ -60,8 +60,8 @@ struct MapConfig<K, V: ?Sized>(PhantomData<(K, V)>);
 
 impl<K, V> Config for MapConfig<K, V>
 where
-    V: ?Sized,
-    K: Hash + Eq,
+    V: ?Sized + 'static,
+    K: Hash + Eq + 'static,
 {
     type Payload = MapPayload<K, V>;
     type Key = K;
@@ -73,16 +73,16 @@ where
 pub struct Iter<'a, K, V, S>
 where
     // TODO: It would be great if the bounds wouldn't have to be on the struct, only on the impls
-    K: Hash + Eq,
-    V: ?Sized,
+    K: Hash + Eq + 'static,
+    V: ?Sized + 'static,
 {
     inner: raw::iterator::Iter<'a, MapConfig<K, V>, S>,
 }
 
 impl<'a, K, V, S> Iterator for Iter<'a, K, V, S>
 where
-    K: Hash + Eq,
-    V: ?Sized,
+    K: Hash + Eq + 'static,
+    V: ?Sized + 'static,
 {
     type Item = Arc<Element<K, V>>;
     fn next(&mut self) -> Option<Arc<Element<K, V>>> {
@@ -148,16 +148,16 @@ where
 pub struct ConMap<K, V, S = RandomState>
 where
     // TODO: It would be great if the bounds wouldn't have to be on the struct, only on the impls
-    K: Hash + Eq,
-    V: ?Sized,
+    K: Hash + Eq + 'static,
+    V: ?Sized + 'static,
 {
     raw: Raw<MapConfig<K, V>, S>,
 }
 
 impl<K, V> ConMap<K, V>
 where
-    K: Hash + Eq,
-    V: ?Sized,
+    K: Hash + Eq + 'static,
+    V: ?Sized + 'static,
 {
     /// Creates a new empty map.
     pub fn new() -> Self {
@@ -168,7 +168,8 @@ where
 // TODO: Once we have the unsized locals, this should be possible to move into the V: ?Sized block
 impl<K, V, S> ConMap<K, V, S>
 where
-    K: Hash + Eq,
+    K: Hash + Eq + 'static,
+    V: 'static,
     S: BuildHasher,
 {
     /// Inserts a new element.

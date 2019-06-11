@@ -42,6 +42,9 @@
 //!   may not be reflected in the list of iterated elements.
 //! * Iteration pins an epoch for the whole time it iterates, possibly delaying releasing some
 //!   memory. Therefore, it is advised not to hold onto iterators for extended periods of time.
+//! * Because the garbage collection of [crossbeam-epoch] can postpone destroying values for
+//!   arbitrary time, the values and keys stored inside need to be owned (eg. `'static`). This
+//!   limitation will likely be lifted eventually.
 //!
 //! # The gist of the data structure
 //!

@@ -14,7 +14,7 @@ use std::marker::PhantomData;
 /// future, but for now this allows tweaking what in how is stored.
 pub trait Config {
     /// The payload (eg. values) stored inside the trie.
-    type Payload: Clone + Borrow<Self::Key>;
+    type Payload: Clone + Borrow<Self::Key> + 'static;
 
     /// Each payload must contain a key as its part. This is the type for the key, which is used
     /// for hashing and identification of values in the tree.
@@ -26,7 +26,7 @@ pub struct Trivial<T>(PhantomData<T>);
 
 impl<T> Config for Trivial<T>
 where
-    T: Clone + Hash + Eq,
+    T: Clone + Hash + Eq + 'static,
 {
     type Payload = T;
     type Key = T;
