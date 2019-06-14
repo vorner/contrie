@@ -93,6 +93,7 @@
 mod existing_or_new;
 pub mod map;
 pub mod raw;
+pub mod set;
 // Some integration-like tests live here, instead of crate/tests. This is because this allows cargo
 // to compile them in parallel with the crate and also run them more in parallel. And I like to get
 // all the test failures at once.
@@ -103,3 +104,4 @@ mod tests;
 
 pub use self::existing_or_new::ExistingOrNew;
 pub use self::map::ConMap;
+pub use self::set::ConSet;
