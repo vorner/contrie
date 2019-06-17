@@ -8,6 +8,8 @@ use std::iter::FromIterator;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+use rayon::iter::{FromParallelIterator, IntoParallelIterator, ParallelExtend, ParallelIterator};
+
 use crate::existing_or_new::ExistingOrNew;
 use crate::raw::config::Config;
 use crate::raw::{self, Raw};
@@ -452,9 +454,104 @@ where
     }
 }
 
+impl<'a, K, V, S> ParallelExtend<Arc<Element<K, V>>> for &'a ConMap<K, V, S>
+where
+    K: Hash + Eq + Send + Sync,
+    V: ?Sized + Send + Sync,
+    S: BuildHasher + Sync,
+{
+    fn par_extend<T>(&mut self, par_iter: T)
+    where
+        T: IntoParallelIterator<Item = Arc<Element<K, V>>>,
+    {
+        par_iter.into_par_iter().for_each(|n| {
+            self.insert_element(n);
+        });
+    }
+}
+
+impl<K, V, S> ParallelExtend<(K, V)> for ConMap<K, V, S>
+where
+    K: Hash + Eq + Send + Sync,
+    S: BuildHasher + Sync,
+    V: Send + Sync,
+{
+    fn par_extend<T>(&mut self, par_iter: T)
+    where
+        T: IntoParallelIterator<Item = (K, V)>,
+    {
+        par_iter.into_par_iter().for_each(|(k, v)| {
+            self.insert(k, v);
+        });
+    }
+}
+
+impl<K, V, S> ParallelExtend<Arc<Element<K, V>>> for ConMap<K, V, S>
+where
+    K: Hash + Eq + Send + Sync,
+    V: ?Sized + Send + Sync,
+    S: BuildHasher + Sync,
+{
+    fn par_extend<T>(&mut self, par_iter: T)
+    where
+        T: IntoParallelIterator<Item = Arc<Element<K, V>>>,
+    {
+        par_iter.into_par_iter().for_each(|n| {
+            self.insert_element(n);
+        });
+    }
+}
+
+impl<'a, K, V, S> ParallelExtend<(K, V)> for &'a ConMap<K, V, S>
+where
+    K: Hash + Eq + Send + Sync,
+    S: BuildHasher + Sync,
+    V: Send + Sync,
+{
+    fn par_extend<T>(&mut self, par_iter: T)
+    where
+        T: IntoParallelIterator<Item = (K, V)>,
+    {
+        par_iter.into_par_iter().for_each(|(k, v)| {
+            self.insert_element(Arc::new(Element::new(k, v)));
+        });
+    }
+}
+
+impl<K, V> FromParallelIterator<Arc<Element<K, V>>> for ConMap<K, V>
+where
+    K: Hash + Eq + Send + Sync,
+    V: ?Sized + Send + Sync,
+{
+    fn from_par_iter<T>(par_iter: T) -> Self
+    where
+        T: IntoParallelIterator<Item = Arc<Element<K, V>>>,
+    {
+        let mut me = ConMap::new();
+        me.par_extend(par_iter);
+        me
+    }
+}
+
+impl<K, V> FromParallelIterator<(K, V)> for ConMap<K, V>
+where
+    K: Hash + Eq + Send + Sync,
+    V: Send + Sync,
+{
+    fn from_par_iter<T>(par_iter: T) -> Self
+    where
+        T: IntoParallelIterator<Item = (K, V)>,
+    {
+        let mut me = ConMap::new();
+        me.par_extend(par_iter);
+        me
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crossbeam_utils::thread;
+    use rayon::prelude::*;
 
     use super::*;
     use crate::raw::tests::NoHasher;
@@ -724,7 +821,7 @@ mod tests {
 
         let mut extracted = map.iter().map(|v| *v.value()).collect::<Vec<_>>();
         extracted.sort();
-        let expected = (0..TEST_BATCH_SMALL).into_iter().collect::<Vec<_>>();
+        let expected = (0..TEST_BATCH_SMALL).collect::<Vec<_>>();
         assert_eq!(expected, extracted);
     }
 
@@ -743,7 +840,6 @@ mod tests {
     #[test]
     fn collect() {
         let map = (0..TEST_BATCH_SMALL)
-            .into_iter()
             .map(|i| (i, i))
             .collect::<ConMap<_, _>>();
 
@@ -756,7 +852,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         extracted.sort();
-        let expected = (0..TEST_BATCH_SMALL).into_iter().collect::<Vec<_>>();
+        let expected = (0..TEST_BATCH_SMALL).collect::<Vec<_>>();
         assert_eq!(expected, extracted);
     }
 
@@ -768,9 +864,7 @@ mod tests {
                 let mut map = &map;
                 s.spawn(move |_| {
                     let start = t * TEST_BATCH_SMALL;
-                    let iter = (start..start + TEST_BATCH_SMALL)
-                        .into_iter()
-                        .map(|i| (i, i));
+                    let iter = (start..start + TEST_BATCH_SMALL).map(|i| (i, i));
                     map.extend(iter);
                 });
             }
@@ -786,9 +880,41 @@ mod tests {
             .collect::<Vec<_>>();
 
         extracted.sort();
-        let expected = (0..TEST_THREADS * TEST_BATCH_SMALL)
-            .into_iter()
+        let expected = (0..TEST_THREADS * TEST_BATCH_SMALL).collect::<Vec<_>>();
+        assert_eq!(expected, extracted);
+    }
+
+    #[test]
+    fn rayon_extend() {
+        let mut map = ConMap::new();
+        map.par_extend((0..TEST_BATCH_SMALL).into_par_iter().map(|i| (i, i)));
+
+        let mut extracted = map
+            .iter()
+            .map(|n| {
+                assert_eq!(n.key(), n.value());
+                *n.value()
+            })
             .collect::<Vec<_>>();
+        extracted.sort();
+
+        let expected = (0..TEST_BATCH_SMALL).collect::<Vec<_>>();
+        assert_eq!(expected, extracted);
+    }
+
+    #[test]
+    fn rayon_from_par_iter() {
+        let map = ConMap::from_par_iter((0..TEST_BATCH_SMALL).into_par_iter().map(|i| (i, i)));
+        let mut extracted = map
+            .iter()
+            .map(|n| {
+                assert_eq!(n.key(), n.value());
+                *n.value()
+            })
+            .collect::<Vec<_>>();
+        extracted.sort();
+
+        let expected = (0..TEST_BATCH_SMALL).collect::<Vec<_>>();
         assert_eq!(expected, extracted);
     }
 }
