@@ -28,8 +28,8 @@ enum Instruction<K, V> {
 
 impl<K, V> Instruction<K, V>
 where
-    K: Arbitrary + Clone + Debug + Eq + Hash,
-    V: Arbitrary + Clone + Debug + PartialEq,
+    K: Arbitrary + Clone + Debug + Eq + Hash + 'static,
+    V: Arbitrary + Clone + Debug + PartialEq + 'static,
 {
     fn strategy() -> impl Strategy<Value = Self> {
         use Instruction::*;
@@ -72,7 +72,10 @@ where
     }
 }
 
-fn insert_parallel_test<T: Clone + Hash + Eq + Send + Sync, H: BuildHasher + Send + Sync>(
+fn insert_parallel_test<
+    T: Clone + Hash + Eq + Send + Sync + 'static,
+    H: BuildHasher + Send + Sync,
+>(
     values: Vec<T>,
     hasher: H,
 ) -> Result<(), TestCaseError> {

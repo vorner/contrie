@@ -1,5 +1,5 @@
 #![doc(
-    html_root_url = "https://docs.rs/contrie/0.1.0/contrie/",
+    html_root_url = "https://docs.rs/contrie/0.1.1/contrie/",
     test(attr(deny(warnings)))
 )]
 // Note: we can't use forbid(unsafe_code). We do allow unsafe code in the raw submodule (but not
@@ -42,6 +42,9 @@
 //!   may not be reflected in the list of iterated elements.
 //! * Iteration pins an epoch for the whole time it iterates, possibly delaying releasing some
 //!   memory. Therefore, it is advised not to hold onto iterators for extended periods of time.
+//! * Because the garbage collection of [crossbeam-epoch] can postpone destroying values for
+//!   arbitrary time, the values and keys stored inside need to be owned (eg. `'static`). This
+//!   limitation will likely be lifted eventually.
 //!
 //! # The gist of the data structure
 //!
@@ -90,6 +93,7 @@
 mod existing_or_new;
 pub mod map;
 pub mod raw;
+pub mod set;
 // Some integration-like tests live here, instead of crate/tests. This is because this allows cargo
 // to compile them in parallel with the crate and also run them more in parallel. And I like to get
 // all the test failures at once.
@@ -100,3 +104,4 @@ mod tests;
 
 pub use self::existing_or_new::ExistingOrNew;
 pub use self::map::ConMap;
+pub use self::set::ConSet;
