@@ -17,6 +17,44 @@ use crate::raw::Raw;
 ///
 /// If you intend to store types that are more expensive to make copies of or are not `Clone`, you
 /// can wrap them in an `Arc` (eg. `Arc<str>`).
+///
+/// ```rust
+/// use contrie::ConSet;
+/// use crossbeam_utils::thread;
+///
+/// let set = ConSet::new();
+///
+/// thread::scope(|s| {
+///     s.spawn(|_| {
+///         set.insert("hello");
+///     });
+///     s.spawn(|_| {
+///         set.insert("world");
+///     });
+/// }).unwrap();
+///
+/// assert_eq!(Some("hello"), set.get("hello"));
+/// assert_eq!(Some("world"), set.get("world"));
+/// assert_eq!(None, set.get("universe"));
+/// set.remove("world");
+/// assert_eq!(None, set.get("world"));
+/// ```
+///
+/// ```rust
+/// use contrie::set::{ConSet};
+/// let set: ConSet<usize> = ConSet::new();
+///
+/// set.insert(0);
+/// set.insert(1);
+///
+/// assert!(set.contains(&1));
+///
+/// set.remove(&1);
+/// assert!(!set.contains(&1));
+///
+/// set.remove(&0);
+/// assert!(set.is_empty());
+/// ```
 pub struct ConSet<T, S = RandomState>
 where
     T: Clone + Hash + Eq + 'static,
