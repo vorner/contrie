@@ -3,11 +3,12 @@
 use std::borrow::Borrow;
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hash};
+use std::iter::FromIterator;
 
 use crossbeam_epoch;
 
 use crate::raw::config::Trivial as TrivialConfig;
-use crate::raw::Raw;
+use crate::raw::{self, Raw};
 
 /// A concurrent lock-free set.
 ///
@@ -145,5 +146,93 @@ where
     }
 }
 
-// TODO: Tests
-// TODO: Iterators
+// TODO: impl Debug for ConSet<T, S>
+
+impl<T, S> ConSet<T, S>
+where
+    T: Clone + Hash + Eq + 'static,
+{
+    /// Returns an iterator through the elements of the set.
+    pub fn iter(&self) -> Iter<T, S> {
+        Iter {
+            inner: raw::iterator::Iter::new(&self.raw),
+        }
+    }
+}
+
+/// The iterator of the [`ConSet`].
+///
+/// See the [`iter`][ConSet::iter] method for details.
+pub struct Iter<'a, T, S>
+where
+    T: Clone + Hash + Eq + 'static,
+{
+    inner: raw::iterator::Iter<'a, TrivialConfig<T>, S>,
+}
+
+impl<'a, T, S> Iterator for Iter<'a, T, S>
+where
+    T: Clone + Hash + Eq + 'static,
+{
+    type Item = T;
+
+    fn next(&mut self) -> Option<T> {
+        self.inner.next().cloned()
+    }
+}
+
+impl<'a, T, S> IntoIterator for &'a ConSet<T, S>
+where
+    T: Clone + Hash + Eq + 'static,
+{
+    type Item = T;
+    type IntoIter = Iter<'a, T, S>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a, T, S> Extend<T> for &'a ConSet<T, S>
+where
+    T: Clone + Hash + Eq + 'static,
+    S: BuildHasher,
+{
+    fn extend<I>(&mut self, iter: I)
+    where
+        I: IntoIterator<Item = T>,
+    {
+        for n in iter {
+            self.insert(n);
+        }
+    }
+}
+
+impl<T, S> Extend<T> for ConSet<T, S>
+where
+    T: Clone + Hash + Eq + 'static,
+    S: BuildHasher,
+{
+    fn extend<I>(&mut self, iter: I)
+    where
+        I: IntoIterator<Item = T>,
+    {
+        let mut me: &ConSet<_, _> = self;
+        me.extend(iter);
+    }
+}
+
+impl<T> FromIterator<T> for ConSet<T>
+where
+    T: Clone + Hash + Eq + 'static,
+{
+    fn from_iter<I>(iter: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+    {
+        let mut me = ConSet::new();
+        me.extend(iter);
+        me
+    }
+}
+
