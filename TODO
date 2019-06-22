@@ -1,5 +1,3 @@
-* Sets
-* Maybe some other types (for eg. clone types instead of arcing them?)
 * Parametrize the things with specification about sequential consistency
   - So people can rely on relative order of insertions, etc.
 * Rayon support
@@ -8,14 +6,9 @@
 * Some refactoring around the pointer juggling in raw
   - The manual casting seems a bit error prone
   - Should we have our own wrapper that loads and gives some king of Option<Either<&Payload, &Inner>>?
-* Instead of smallvecs, we could use the raw allocator API, allocate a struct like { len, data: [ptr; 0] } and cast it around.
-  - Boxed slice won't work, because it's a fat pointer and these don't fit well into atomics
 * Manually implement further traits for ExistingOrNew
   - Like Display, Hex, etc…
 * Is the deref on ExistingOrNew an abuse?
-* If the Data node was turned from an array to concurrent linked list, it should be possible to get rid of the Config::Payload: Clone bound.
-  That in turn could give us some more flexibility in designing the APIs
 * Due to crossbeam-epoch, destruction of keys and values may be moved *past* the destructor of the map.
   - Add 'static bounds as a temporary solution ✔
   - Explore if this can be worked around by using a separate Collector and flush it in the destructor
-* Debug for ConSet
