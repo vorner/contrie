@@ -262,6 +262,33 @@ mod tests {
     const TEST_REP: usize = 20;
 
     #[test]
+    fn debug_when_empty() {
+        let set: ConSet<String> = ConSet::new();
+        assert_eq!("{}".to_owned(), format!("{:?}", set));
+    }
+
+    #[test]
+    fn debug_when_has_elements() {
+        let set: ConSet<&str> = ConSet::new();
+        assert!(set.insert("hello").is_none());
+        assert!(set.insert("world").is_none());
+        assert_eq!("{\"hello\", \"world\"}".to_owned(), format!("{:?}", set));
+    }
+
+    #[test]
+    fn debug_when_elements_are_added_and_removed() {
+        let set: ConSet<&str> = ConSet::new();
+        assert_eq!("{}".to_owned(), format!("{:?}", set));
+        assert!(set.insert("hello").is_none());
+        assert!(set.insert("world").is_none());
+        assert_eq!("{\"hello\", \"world\"}".to_owned(), format!("{:?}", set));
+        assert!(set.remove("world").is_some());
+        assert_eq!("{\"hello\"}".to_owned(), format!("{:?}", set));
+        assert!(set.remove("hello").is_some());
+        assert_eq!("{}".to_owned(), format!("{:?}", set));
+    }
+
+    #[test]
     fn create_destroy() {
         let set: ConSet<String> = ConSet::new();
         drop(set);
