@@ -2,6 +2,7 @@
 
 use std::borrow::Borrow;
 use std::collections::hash_map::RandomState;
+use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::hash::{BuildHasher, Hash};
 use std::iter::FromIterator;
 
@@ -146,7 +147,14 @@ where
     }
 }
 
-// TODO: impl Debug for ConSet<T, S>
+impl<T, S> Debug for ConSet<T, S>
+where
+    T: Debug + Clone + Hash + Eq + 'static,
+{
+    fn fmt(&self, fmt: &mut Formatter) -> FmtResult {
+        fmt.debug_set().entries(self.iter()).finish()
+    }
+}
 
 impl<T, S> ConSet<T, S>
 where
