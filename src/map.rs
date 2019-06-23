@@ -323,14 +323,17 @@ where
 impl<K, V, S> Debug for ConMap<K, V, S>
 where
     K: Debug + Hash + Eq,
-    // TODO: Why doesn't the std allow the entry to take unsized types?
-    V: Debug,
+    V: Debug + ?Sized,
 {
     fn fmt(&self, fmt: &mut Formatter) -> FmtResult {
         let mut d = fmt.debug_map();
         // TODO: As we return Arcs, it seem we can't use the iterator approach with .map :-(
+        // This might hint to need for better iteration API?
         for n in self {
-            d.entry(n.key(), n.value());
+            // Hack: As of 1.37.0 the parameters to entry need to be &Sized. By using a double-ref,
+            // we satisfy the compiler's pickiness in that regard.
+            let val: &&V = &n.value();
+            d.entry(n.key() as &dyn Debug, val);
         }
         d.finish()
     }
