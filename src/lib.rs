@@ -1,5 +1,5 @@
 #![doc(
-    html_root_url = "https://docs.rs/contrie/0.1.1/contrie/",
+    html_root_url = "https://docs.rs/contrie/0.1.2/contrie/",
     test(attr(deny(warnings)))
 )]
 // Note: we can't use forbid(unsafe_code). We do allow unsafe code in the raw submodule (but not
