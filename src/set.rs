@@ -2,6 +2,7 @@
 
 use std::borrow::Borrow;
 use std::collections::hash_map::RandomState;
+use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::hash::{BuildHasher, Hash};
 use std::iter::FromIterator;
 
@@ -146,7 +147,14 @@ where
     }
 }
 
-// TODO: impl Debug for ConSet<T, S>
+impl<T, S> Debug for ConSet<T, S>
+where
+    T: Debug + Clone + Hash + Eq + 'static,
+{
+    fn fmt(&self, fmt: &mut Formatter) -> FmtResult {
+        fmt.debug_set().entries(self.iter()).finish()
+    }
+}
 
 impl<T, S> ConSet<T, S>
 where
@@ -248,6 +256,39 @@ mod tests {
     const TEST_BATCH: usize = 10000;
     const TEST_BATCH_SMALL: usize = 100;
     const TEST_REP: usize = 20;
+
+    #[test]
+    fn debug_when_empty() {
+        let set: ConSet<String> = ConSet::new();
+        assert_eq!("{}", &format!("{:?}", set));
+    }
+
+    #[test]
+    fn debug_when_has_elements() {
+        let set: ConSet<&str> = ConSet::new();
+        assert!(set.insert("hello").is_none());
+        assert!(set.insert("world").is_none());
+        let expected = "{\"hello\", \"world\"}";
+        let actual = &format!("{:?}", set);
+
+        let mut expected_chars: Vec<char> = expected.chars().collect();
+        expected_chars.sort();
+        let mut actual_chars: Vec<char> = actual.chars().collect();
+        actual_chars.sort();
+        assert_eq!(expected_chars, actual_chars);
+    }
+
+    #[test]
+    fn debug_when_elements_are_added_and_removed() {
+        let set: ConSet<&str> = ConSet::new();
+        assert_eq!("{}", &format!("{:?}", set));
+        assert!(set.insert("hello").is_none());
+        assert!(set.insert("hello").is_some());
+        assert!(set.insert("hello").is_some());
+        assert_eq!("{\"hello\"}", &format!("{:?}", set));
+        assert!(set.remove("hello").is_some());
+        assert_eq!("{}", &format!("{:?}", set));
+    }
 
     #[test]
     fn create_destroy() {
