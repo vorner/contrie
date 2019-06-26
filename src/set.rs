@@ -7,6 +7,8 @@ use std::hash::{BuildHasher, Hash};
 use std::iter::FromIterator;
 
 use crossbeam_epoch;
+
+#[cfg(feature = "parallel")]
 use rayon::iter::{FromParallelIterator, IntoParallelIterator, ParallelExtend, ParallelIterator};
 
 use crate::raw::config::Trivial as TrivialConfig;
@@ -245,6 +247,7 @@ where
     }
 }
 
+#[cfg(feature = "parallel")]
 impl<'a, T, S> ParallelExtend<T> for &'a ConSet<T, S>
 where
     T: Clone + Hash + Eq + Send + Sync,
@@ -260,6 +263,7 @@ where
     }
 }
 
+#[cfg(feature = "parallel")]
 impl<T, S> ParallelExtend<T> for ConSet<T, S>
 where
     T: Clone + Hash + Eq + Send + Sync,
@@ -274,6 +278,7 @@ where
     }
 }
 
+#[cfg(feature = "parallel")]
 impl<T> FromParallelIterator<T> for ConSet<T>
 where
     T: Clone + Hash + Eq + Send + Sync,
@@ -291,6 +296,7 @@ where
 #[cfg(test)]
 mod tests {
     use crossbeam_utils::thread;
+    #[cfg(feature = "parallel")]
     use rayon::prelude::*;
 
     use super::*;
@@ -586,6 +592,7 @@ mod tests {
         assert_eq!(expected, extracted);
     }
 
+    #[cfg(feature = "parallel")]
     #[test]
     fn rayon_extend() {
         let mut map = ConSet::new();
@@ -598,6 +605,7 @@ mod tests {
         assert_eq!(expected, extracted);
     }
 
+    #[cfg(feature = "parallel")]
     #[test]
     fn rayon_from_par_iter() {
         let map = ConSet::from_par_iter((0..TEST_BATCH_SMALL).into_par_iter());

@@ -1,4 +1,5 @@
 #![allow(unsafe_code)]
+#![cfg_attr(feature = "cargo-clippy", deny(clippy::all))]
 //! The core implementation of the concurrent trie data structure.
 //!
 //! This module contains the [`Raw`][crate::raw::Raw] type, which is the engine of all the data
@@ -910,7 +911,7 @@ pub(crate) mod tests {
         fn write(&mut self, value: &[u8]) {
             for val in value {
                 for idx in 0..mem::size_of::<u64>() {
-                    self.0 ^= (*val as u64) << (8 * idx);
+                    self.0 ^= u64::from(*val) << (8 * idx);
                 }
             }
         }

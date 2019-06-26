@@ -8,6 +8,7 @@ use std::iter::FromIterator;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+#[cfg(feature = "parallel")]
 use rayon::iter::{FromParallelIterator, IntoParallelIterator, ParallelExtend, ParallelIterator};
 
 use crate::existing_or_new::ExistingOrNew;
@@ -454,6 +455,7 @@ where
     }
 }
 
+#[cfg(feature = "parallel")]
 impl<'a, K, V, S> ParallelExtend<Arc<Element<K, V>>> for &'a ConMap<K, V, S>
 where
     K: Hash + Eq + Send + Sync,
@@ -470,6 +472,7 @@ where
     }
 }
 
+#[cfg(feature = "parallel")]
 impl<K, V, S> ParallelExtend<(K, V)> for ConMap<K, V, S>
 where
     K: Hash + Eq + Send + Sync,
@@ -480,12 +483,15 @@ where
     where
         T: IntoParallelIterator<Item = (K, V)>,
     {
-        par_iter.into_par_iter().for_each(|(k, v)| {
-            self.insert(k, v);
-        });
+        self.par_extend(
+            par_iter
+                .into_par_iter()
+                .map(|(k, v)| Arc::new(Element::new(k, v))),
+        );
     }
 }
 
+#[cfg(feature = "parallel")]
 impl<K, V, S> ParallelExtend<Arc<Element<K, V>>> for ConMap<K, V, S>
 where
     K: Hash + Eq + Send + Sync,
@@ -496,12 +502,12 @@ where
     where
         T: IntoParallelIterator<Item = Arc<Element<K, V>>>,
     {
-        par_iter.into_par_iter().for_each(|n| {
-            self.insert_element(n);
-        });
+        let mut me: &ConMap<_, _, _> = self;
+        me.par_extend(par_iter);
     }
 }
 
+#[cfg(feature = "parallel")]
 impl<'a, K, V, S> ParallelExtend<(K, V)> for &'a ConMap<K, V, S>
 where
     K: Hash + Eq + Send + Sync,
@@ -512,12 +518,15 @@ where
     where
         T: IntoParallelIterator<Item = (K, V)>,
     {
-        par_iter.into_par_iter().for_each(|(k, v)| {
-            self.insert_element(Arc::new(Element::new(k, v)));
-        });
+        self.par_extend(
+            par_iter
+                .into_par_iter()
+                .map(|(k, v)| Arc::new(Element::new(k, v))),
+        );
     }
 }
 
+#[cfg(feature = "parallel")]
 impl<K, V> FromParallelIterator<Arc<Element<K, V>>> for ConMap<K, V>
 where
     K: Hash + Eq + Send + Sync,
@@ -533,6 +542,7 @@ where
     }
 }
 
+#[cfg(feature = "parallel")]
 impl<K, V> FromParallelIterator<(K, V)> for ConMap<K, V>
 where
     K: Hash + Eq + Send + Sync,
@@ -551,6 +561,8 @@ where
 #[cfg(test)]
 mod tests {
     use crossbeam_utils::thread;
+
+    #[cfg(feature = "parallel")]
     use rayon::prelude::*;
 
     use super::*;
@@ -884,6 +896,7 @@ mod tests {
         assert_eq!(expected, extracted);
     }
 
+    #[cfg(feature = "parallel")]
     #[test]
     fn rayon_extend() {
         let mut map = ConMap::new();
@@ -902,6 +915,7 @@ mod tests {
         assert_eq!(expected, extracted);
     }
 
+    #[cfg(feature = "parallel")]
     #[test]
     fn rayon_from_par_iter() {
         let map = ConMap::from_par_iter((0..TEST_BATCH_SMALL).into_par_iter().map(|i| (i, i)));
