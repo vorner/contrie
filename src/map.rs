@@ -8,7 +8,7 @@ use std::iter::FromIterator;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-#[cfg(feature = "parallel")]
+#[cfg(feature = "rayon")]
 use rayon::iter::{FromParallelIterator, IntoParallelIterator, ParallelExtend, ParallelIterator};
 
 use crate::existing_or_new::ExistingOrNew;
@@ -455,7 +455,7 @@ where
     }
 }
 
-#[cfg(feature = "parallel")]
+#[cfg(feature = "rayon")]
 impl<'a, K, V, S> ParallelExtend<Arc<Element<K, V>>> for &'a ConMap<K, V, S>
 where
     K: Hash + Eq + Send + Sync,
@@ -472,7 +472,7 @@ where
     }
 }
 
-#[cfg(feature = "parallel")]
+#[cfg(feature = "rayon")]
 impl<K, V, S> ParallelExtend<(K, V)> for ConMap<K, V, S>
 where
     K: Hash + Eq + Send + Sync,
@@ -491,7 +491,7 @@ where
     }
 }
 
-#[cfg(feature = "parallel")]
+#[cfg(feature = "rayon")]
 impl<K, V, S> ParallelExtend<Arc<Element<K, V>>> for ConMap<K, V, S>
 where
     K: Hash + Eq + Send + Sync,
@@ -507,7 +507,7 @@ where
     }
 }
 
-#[cfg(feature = "parallel")]
+#[cfg(feature = "rayon")]
 impl<'a, K, V, S> ParallelExtend<(K, V)> for &'a ConMap<K, V, S>
 where
     K: Hash + Eq + Send + Sync,
@@ -526,7 +526,7 @@ where
     }
 }
 
-#[cfg(feature = "parallel")]
+#[cfg(feature = "rayon")]
 impl<K, V> FromParallelIterator<Arc<Element<K, V>>> for ConMap<K, V>
 where
     K: Hash + Eq + Send + Sync,
@@ -542,7 +542,7 @@ where
     }
 }
 
-#[cfg(feature = "parallel")]
+#[cfg(feature = "rayon")]
 impl<K, V> FromParallelIterator<(K, V)> for ConMap<K, V>
 where
     K: Hash + Eq + Send + Sync,
@@ -562,7 +562,7 @@ where
 mod tests {
     use crossbeam_utils::thread;
 
-    #[cfg(feature = "parallel")]
+    #[cfg(feature = "rayon")]
     use rayon::prelude::*;
 
     use super::*;
@@ -896,7 +896,7 @@ mod tests {
         assert_eq!(expected, extracted);
     }
 
-    #[cfg(feature = "parallel")]
+    #[cfg(feature = "rayon")]
     #[test]
     fn rayon_extend() {
         let mut map = ConMap::new();
@@ -915,7 +915,7 @@ mod tests {
         assert_eq!(expected, extracted);
     }
 
-    #[cfg(feature = "parallel")]
+    #[cfg(feature = "rayon")]
     #[test]
     fn rayon_from_par_iter() {
         let map = ConMap::from_par_iter((0..TEST_BATCH_SMALL).into_par_iter().map(|i| (i, i)));

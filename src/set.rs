@@ -8,7 +8,7 @@ use std::iter::FromIterator;
 
 use crossbeam_epoch;
 
-#[cfg(feature = "parallel")]
+#[cfg(feature = "rayon")]
 use rayon::iter::{FromParallelIterator, IntoParallelIterator, ParallelExtend, ParallelIterator};
 
 use crate::raw::config::Trivial as TrivialConfig;
@@ -247,7 +247,7 @@ where
     }
 }
 
-#[cfg(feature = "parallel")]
+#[cfg(feature = "rayon")]
 impl<'a, T, S> ParallelExtend<T> for &'a ConSet<T, S>
 where
     T: Clone + Hash + Eq + Send + Sync,
@@ -263,7 +263,7 @@ where
     }
 }
 
-#[cfg(feature = "parallel")]
+#[cfg(feature = "rayon")]
 impl<T, S> ParallelExtend<T> for ConSet<T, S>
 where
     T: Clone + Hash + Eq + Send + Sync,
@@ -278,7 +278,7 @@ where
     }
 }
 
-#[cfg(feature = "parallel")]
+#[cfg(feature = "rayon")]
 impl<T> FromParallelIterator<T> for ConSet<T>
 where
     T: Clone + Hash + Eq + Send + Sync,
@@ -296,7 +296,7 @@ where
 #[cfg(test)]
 mod tests {
     use crossbeam_utils::thread;
-    #[cfg(feature = "parallel")]
+    #[cfg(feature = "rayon")]
     use rayon::prelude::*;
 
     use super::*;
@@ -592,20 +592,20 @@ mod tests {
         assert_eq!(expected, extracted);
     }
 
-    #[cfg(feature = "parallel")]
+    #[cfg(feature = "rayon")]
     #[test]
     fn rayon_extend() {
         let mut map = ConSet::new();
         map.par_extend((0..TEST_BATCH_SMALL).into_par_iter());
 
         let mut extracted = map.iter().collect::<Vec<_>>();
-        extracted.sort();
+        extracted.par_sort();
 
         let expected = (0..TEST_BATCH_SMALL).collect::<Vec<_>>();
         assert_eq!(expected, extracted);
     }
 
-    #[cfg(feature = "parallel")]
+    #[cfg(feature = "rayon")]
     #[test]
     fn rayon_from_par_iter() {
         let map = ConSet::from_par_iter((0..TEST_BATCH_SMALL).into_par_iter());

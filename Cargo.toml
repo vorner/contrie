@@ -30,6 +30,3 @@ version-sync = "~0.7"
 # Some tests are rather slow. Furthermore, optimalisations tend to provoke races and UBs to
 # manifest, so we want to try that in tests if possible.
 opt-level = 1
-
-[features]
-parallel = ["rayon"]

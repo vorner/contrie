@@ -24,7 +24,7 @@ before_install:
 script:
   - if [ "$TRAVIS_RUST_VERSION" != "nightly" ]; then
     cargo fmt --all -- --check &&
-    cargo clippy --all --tests --examples;
+    cargo clippy --all --tests --examples -- --deny clippy::all;
     fi
   - export RUST_BACKTRACE=1
   - export CARGO_INCREMENTAL=1
