@@ -8,6 +8,9 @@ use std::iter::FromIterator;
 
 use crossbeam_epoch;
 
+#[cfg(feature = "rayon")]
+use rayon::iter::{FromParallelIterator, IntoParallelIterator, ParallelExtend, ParallelIterator};
+
 use crate::raw::config::Trivial as TrivialConfig;
 use crate::raw::{self, Raw};
 
@@ -244,9 +247,57 @@ where
     }
 }
 
+#[cfg(feature = "rayon")]
+impl<'a, T, S> ParallelExtend<T> for &'a ConSet<T, S>
+where
+    T: Clone + Hash + Eq + Send + Sync,
+    S: BuildHasher + Sync,
+{
+    fn par_extend<I>(&mut self, par_iter: I)
+    where
+        I: IntoParallelIterator<Item = T>,
+    {
+        par_iter.into_par_iter().for_each(|n| {
+            self.insert(n);
+        });
+    }
+}
+
+#[cfg(feature = "rayon")]
+impl<T, S> ParallelExtend<T> for ConSet<T, S>
+where
+    T: Clone + Hash + Eq + Send + Sync,
+    S: BuildHasher + Sync,
+{
+    fn par_extend<I>(&mut self, par_iter: I)
+    where
+        I: IntoParallelIterator<Item = T>,
+    {
+        let mut me: &ConSet<_, _> = self;
+        me.par_extend(par_iter);
+    }
+}
+
+#[cfg(feature = "rayon")]
+impl<T> FromParallelIterator<T> for ConSet<T>
+where
+    T: Clone + Hash + Eq + Send + Sync,
+{
+    fn from_par_iter<I>(iter: I) -> Self
+    where
+        I: IntoParallelIterator<Item = T>,
+    {
+        let mut me = ConSet::new();
+        me.par_extend(iter);
+        me
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crossbeam_utils::thread;
+    #[cfg(feature = "rayon")]
+    use rayon::prelude::*;
 
     use super::*;
     use crate::raw::tests::NoHasher;
@@ -491,7 +542,7 @@ mod tests {
         let mut extracted = set.iter().collect::<Vec<_>>();
 
         extracted.sort();
-        let expected = (0..TEST_BATCH_SMALL).into_iter().collect::<Vec<_>>();
+        let expected = (0..TEST_BATCH_SMALL).collect::<Vec<_>>();
         assert_eq!(expected, extracted);
     }
 
@@ -509,11 +560,11 @@ mod tests {
 
     #[test]
     fn collect() {
-        let set = (0..TEST_BATCH_SMALL).into_iter().collect::<ConSet<_>>();
+        let set = (0..TEST_BATCH_SMALL).collect::<ConSet<_>>();
 
         let mut extracted = set.iter().collect::<Vec<_>>();
         extracted.sort();
-        let expected = (0..TEST_BATCH_SMALL).into_iter().collect::<Vec<_>>();
+        let expected = (0..TEST_BATCH_SMALL).collect::<Vec<_>>();
         assert_eq!(expected, extracted);
     }
 
@@ -526,7 +577,7 @@ mod tests {
                 let mut set = &set;
                 s.spawn(move |_| {
                     let start = t * TEST_BATCH_SMALL;
-                    let iter = (start..start + TEST_BATCH_SMALL).into_iter();
+                    let iter = start..start + TEST_BATCH_SMALL;
                     set.extend(iter);
                 });
             }
@@ -536,10 +587,33 @@ mod tests {
         let mut extracted = set.iter().collect::<Vec<_>>();
 
         extracted.sort();
-        let expected = (0..TEST_THREADS * TEST_BATCH_SMALL)
-            .into_iter()
-            .collect::<Vec<_>>();
+        let expected = (0..TEST_THREADS * TEST_BATCH_SMALL).collect::<Vec<_>>();
 
+        assert_eq!(expected, extracted);
+    }
+
+    #[cfg(feature = "rayon")]
+    #[test]
+    fn rayon_extend() {
+        let mut map = ConSet::new();
+        map.par_extend((0..TEST_BATCH_SMALL).into_par_iter());
+
+        let mut extracted = map.iter().collect::<Vec<_>>();
+        extracted.par_sort();
+
+        let expected = (0..TEST_BATCH_SMALL).collect::<Vec<_>>();
+        assert_eq!(expected, extracted);
+    }
+
+    #[cfg(feature = "rayon")]
+    #[test]
+    fn rayon_from_par_iter() {
+        let map = ConSet::from_par_iter((0..TEST_BATCH_SMALL).into_par_iter());
+
+        let mut extracted = map.iter().collect::<Vec<_>>();
+        extracted.sort();
+
+        let expected = (0..TEST_BATCH_SMALL).collect::<Vec<_>>();
         assert_eq!(expected, extracted);
     }
 }

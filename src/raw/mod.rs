@@ -910,7 +910,7 @@ pub(crate) mod tests {
         fn write(&mut self, value: &[u8]) {
             for val in value {
                 for idx in 0..mem::size_of::<u64>() {
-                    self.0 ^= (*val as u64) << 8 * idx;
+                    self.0 ^= u64::from(*val) << (8 * idx);
                 }
             }
         }
@@ -935,7 +935,7 @@ pub(crate) mod tests {
         hasher.write_u8(0);
         assert_eq!(0, hasher.finish());
         hasher.write_u8(8);
-        assert_eq!(0x0808080808080808, hasher.finish());
+        assert_eq!(0x0808_0808_0808_0808, hasher.finish());
     }
 
     #[test]

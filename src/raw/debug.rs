@@ -38,7 +38,7 @@ where
                 return;
             } else if flags.contains(NodeFlags::DATA) {
                 let data = unsafe { load_data::<C>(sub) };
-                assert!(data.len() > 0, "Empty data nodes should not exist");
+                assert!(!data.is_empty(), "Empty data nodes should not exist");
                 *data_cnt += data.len();
             } else {
                 let sub = unsafe { sub.deref() };

@@ -12,20 +12,26 @@ matrix:
     allow_failures:
         - rust: nightly
 
-before_script:
-    - |
-      (travis_wait rustup component add rustfmt-preview || true) &&
-      (travis_wait rustup component add clippy-preview || true)
+before_install:
+  - set -e
+  - export RUSTFLAGS="-D warnings"
+  - if [ "$TRAVIS_RUST_VERSION" != "nightly" ]; then
+    rustup self update &&
+    rustup component add rustfmt clippy &&
+    cargo clippy --version;
+    fi
 
 script:
-    - |
-      export PATH="$PATH":~/.cargo/bin &&
-      export RUST_BACKTRACE=1 &&
-      export CARGO_INCREMENTAL=1 &&
-      cargo build &&
-      cargo test --release --all &&
-      cargo test --release -- --ignored &&
-      cargo doc --no-deps &&
-      (test "$TRAVIS_RUST_VERSION" != nightly || cargo test --all --release --benches) &&
-      cargo clippy --all -- --deny clippy::all &&
-      cargo fmt --all -- --check
+  - if [ "$TRAVIS_RUST_VERSION" != "nightly" ]; then
+    cargo fmt --all -- --check &&
+    cargo clippy --all --tests --examples -- --deny clippy::all;
+    fi
+  - export RUST_BACKTRACE=1
+  - export CARGO_INCREMENTAL=1
+  - export PATH="$PATH":~/.cargo/bin
+  - cargo test --release --all
+  - cargo test --release -- --ignored
+  - cargo doc --no-deps
+  - if [ "$TRAVIS_RUST_VERSION" = "nightly" ]; then
+    cargo test --all --release --benches;
+    fi

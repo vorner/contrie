@@ -17,6 +17,7 @@ bitflags = "~1"
 crossbeam-epoch = "~0.7"
 # TODO: Consider what to do with the union feature. Why is it still requiring nightly?
 smallvec = "~0.6"
+rayon = { version = "~1", optional = true }
 
 [dev-dependencies]
 crossbeam-utils = "~0.6"
