@@ -29,6 +29,7 @@ script:
   - export RUST_BACKTRACE=1
   - export CARGO_INCREMENTAL=1
   - export PATH="$PATH":~/.cargo/bin
+  - cargo test --release --all --all-features
   - cargo test --release --all
   - cargo test --release -- --ignored
   - cargo doc --no-deps
