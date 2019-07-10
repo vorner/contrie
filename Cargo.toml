@@ -11,6 +11,11 @@ keywords = ["atomic", "concurrent", "map", "set", "lock-free"]
 categories = ["concurrency", "algorithms", "data-structures"]
 license = "Apache-2.0/MIT"
 
+[badges]
+travis-ci = { repository = "vorner/contrie" }
+appveyor = { repository = "vorner/contrie" }
+maintenance = { status = "actively-developed" }
+
 [dependencies]
 arrayvec = "~0.4"
 bitflags = "~1"
