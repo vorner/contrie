@@ -83,6 +83,11 @@
 //! assert_eq!(3, *map.get(&2).unwrap().value());
 //! ```
 //!
+//! # Features
+//!
+//! If compiled with the `rayon` feature, some parallel traits will be implemented for
+//! the types provided by this crate.
+//!
 //! [wait-free]: https://en.wikipedia.org/wiki/Non-blocking_algorithm#Wait-freedom
 //! [lock-free]: https://en.wikipedia.org/wiki/Non-blocking_algorithm#Lock-freedom
 //! [crossbeam-epoch]: https://docs.rs/crossbeam-epoch

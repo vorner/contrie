@@ -1,7 +1,7 @@
 [package]
 name = "contrie"
 version = "0.1.2"
-authors = ["Michal 'vorner' Vaner <vorner@vorner.cz>", "Edoardo Rossi <zeroed@posteo.net>"]
+authors = ["Michal 'vorner' Vaner <vorner@vorner.cz>", "Edoardo Rossi <zeroed@posteo.net>", "Evan Cameron <cameron.evan@gmail.com>"]
 edition = "2018"
 description = "Concurrent map and set"
 documentation = "https://docs.rs/contrie"
@@ -35,3 +35,6 @@ version-sync = "~0.7"
 # Some tests are rather slow. Furthermore, optimalisations tend to provoke races and UBs to
 # manifest, so we want to try that in tests if possible.
 opt-level = 1
+
+[package.metadata.docs.rs]
+all-features= true
