@@ -90,6 +90,7 @@
 //! [article]: https://www.researchgate.net/publication/221643801_Concurrent_Tries_with_Efficient_Non-Blocking_Snapshots
 //! [Wikipedia entry]: https://en.wikipedia.org/wiki/Ctrie
 
+pub mod clonemap;
 mod existing_or_new;
 pub mod map;
 pub mod raw;
@@ -102,6 +103,7 @@ pub mod set;
 #[cfg(test)]
 mod tests;
 
+pub use self::clonemap::CloneConMap;
 pub use self::existing_or_new::ExistingOrNew;
 pub use self::map::ConMap;
 pub use self::set::ConSet;
