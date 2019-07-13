@@ -391,3 +391,381 @@ where
         me
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crossbeam_utils::thread;
+    use std::rc::Rc;
+
+    #[cfg(feature = "rayon")]
+    use rayon::prelude::*;
+
+    use super::*;
+    use crate::raw::tests::NoHasher;
+    use crate::raw::LEVEL_CELLS;
+
+    const TEST_THREADS: usize = 4;
+    const TEST_BATCH: usize = 10000;
+    const TEST_BATCH_SMALL: usize = 100;
+    const TEST_REP: usize = 20;
+
+    #[test]
+    fn create_destroy() {
+        let map: CloneConMap<String, usize> = CloneConMap::new();
+        drop(map);
+    }
+
+    #[test]
+    fn debug_formatting() {
+        let map: CloneConMap<&str, &str> = CloneConMap::new();
+        map.insert("hello", "world");
+        assert_eq!("{\"hello\": \"world\"}".to_owned(), format!("{:?}", map));
+    }
+
+    #[test]
+    fn lookup_empty() {
+        let map: CloneConMap<String, usize> = CloneConMap::new();
+        assert!(map.get("hello").is_none());
+    }
+
+    #[test]
+    fn insert_lookup() {
+        let map = CloneConMap::new();
+        assert!(map.insert("hello", "world").is_none());
+        assert!(map.get("world").is_none());
+        let found = map.get("hello").unwrap();
+        assert_eq!(("hello", "world"), found);
+    }
+
+    #[test]
+    fn insert_overwrite_lookup() {
+        let map = CloneConMap::new();
+        assert!(map.insert("hello", "world").is_none());
+        let old = map.insert("hello", "universe").unwrap();
+        assert_eq!(("hello", "world"), old);
+        let found = map.get("hello").unwrap();
+        assert_eq!(("hello", "universe"), found);
+    }
+
+    // Insert a lot of things, to make sure we have multiple levels.
+    #[test]
+    fn insert_many() {
+        let map = CloneConMap::new();
+        for i in 0..TEST_BATCH * LEVEL_CELLS {
+            assert!(map.insert(i, i).is_none());
+        }
+
+        for i in 0..TEST_BATCH * LEVEL_CELLS {
+            assert_eq!(i, map.get(&i).unwrap().1);
+        }
+    }
+
+    #[test]
+    fn par_insert_many() {
+        for _ in 0..TEST_REP {
+            let map: CloneConMap<usize, usize> = CloneConMap::new();
+            thread::scope(|s| {
+                for t in 0..TEST_THREADS {
+                    let map = &map;
+                    s.spawn(move |_| {
+                        for i in 0..TEST_BATCH {
+                            let num = t * TEST_BATCH + i;
+                            assert!(map.insert(num, num).is_none());
+                        }
+                    });
+                }
+            })
+            .unwrap();
+
+            for i in 0..TEST_BATCH * TEST_THREADS {
+                assert_eq!(map.get(&i).unwrap().1, i);
+            }
+        }
+    }
+
+    #[test]
+    fn par_get_many() {
+        for _ in 0..TEST_REP {
+            let map = CloneConMap::new();
+            for i in 0..TEST_BATCH * TEST_THREADS {
+                assert!(map.insert(i, i).is_none());
+            }
+            thread::scope(|s| {
+                for t in 0..TEST_THREADS {
+                    let map = &map;
+                    s.spawn(move |_| {
+                        for i in 0..TEST_BATCH {
+                            let num = t * TEST_BATCH + i;
+                            assert_eq!(map.get(&num).unwrap().1, num);
+                        }
+                    });
+                }
+            })
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn collisions() {
+        let map = CloneConMap::with_hasher(NoHasher);
+        // While their hash is the same under the hasher, they don't kick each other out.
+        for i in 0..TEST_BATCH_SMALL {
+            assert!(map.insert(i, i).is_none());
+        }
+        // And all are present.
+        for i in 0..TEST_BATCH_SMALL {
+            assert_eq!(i, map.get(&i).unwrap().1);
+        }
+        // But reusing the key kicks the other one out.
+        for i in 0..TEST_BATCH_SMALL {
+            assert_eq!(i, map.insert(i, i + 1).unwrap().1);
+            assert_eq!(i + 1, map.get(&i).unwrap().1);
+        }
+    }
+
+    #[test]
+    fn get_or_insert_empty() {
+        let map = CloneConMap::new();
+        let val = map.get_or_insert("hello", 42);
+        assert_eq!(42, val.1);
+        assert_eq!("hello", val.0);
+        assert!(val.is_new());
+    }
+
+    #[test]
+    fn get_or_insert_existing() {
+        let map = CloneConMap::new();
+        assert!(map.insert("hello", 42).is_none());
+        let val = map.get_or_insert("hello", 0);
+        // We still have the original
+        assert_eq!(42, val.1);
+        assert_eq!("hello", val.0);
+        assert!(!val.is_new());
+    }
+
+    #[test]
+    fn get_or_insert_existing_with_counter() {
+        let map = CloneConMap::new();
+        assert!(map.insert("hello", Rc::new(42)).is_none());
+        let val = map.get_or_insert("hello", Rc::new(0));
+        // We still have the original
+        assert_eq!(&42, val.1.borrow());
+        assert_eq!("hello", val.0);
+        assert_eq!(2, Rc::strong_count(&val.1));
+        let val = map.get_or_insert("hello", Rc::new(0));
+        assert_eq!(3, Rc::strong_count(&val.1));
+        assert!(!val.is_new());
+    }
+
+    fn get_or_insert_many_inner<H: BuildHasher>(map: CloneConMap<usize, usize, H>, len: usize) {
+        for i in 0..len {
+            let val = map.get_or_insert(i, i);
+            assert_eq!(i, val.0);
+            assert_eq!(i, val.1);
+            assert!(val.is_new());
+        }
+
+        for i in 0..len {
+            let val = map.get_or_insert(i, 0);
+            assert_eq!(i, val.0);
+            assert_eq!(i, val.1);
+            assert!(!val.is_new());
+        }
+    }
+
+    #[test]
+    fn get_or_insert_many() {
+        get_or_insert_many_inner(CloneConMap::new(), TEST_BATCH);
+    }
+
+    #[test]
+    fn get_or_insert_collision() {
+        get_or_insert_many_inner(CloneConMap::with_hasher(NoHasher), TEST_BATCH_SMALL);
+    }
+
+    #[test]
+    fn simple_remove() {
+        let map = CloneConMap::new();
+        assert!(map.remove(&42).is_none());
+        assert!(map.insert(42, "hello").is_none());
+        assert_eq!("hello", map.get(&42).unwrap().1);
+        assert_eq!("hello", map.remove(&42).unwrap().1);
+        assert!(map.get(&42).is_none());
+        assert!(map.is_empty());
+        assert!(map.remove(&42).is_none());
+        assert!(map.is_empty());
+    }
+
+    fn remove_many_inner<H: BuildHasher>(mut map: CloneConMap<usize, usize, H>, len: usize) {
+        for i in 0..len {
+            assert!(map.insert(i, i).is_none());
+        }
+        for i in 0..len {
+            assert_eq!(i, map.get(&i).unwrap().1);
+            assert_eq!(i, map.remove(&i).unwrap().1);
+            assert!(map.get(&i).is_none());
+            map.raw.assert_pruned();
+        }
+
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn remove_many() {
+        remove_many_inner(CloneConMap::new(), TEST_BATCH);
+    }
+
+    #[test]
+    fn remove_many_collision() {
+        remove_many_inner(CloneConMap::with_hasher(NoHasher), TEST_BATCH_SMALL);
+    }
+
+    #[test]
+    fn collision_remove_one_left() {
+        let mut map = CloneConMap::with_hasher(NoHasher);
+        map.insert(1, 1);
+        map.insert(2, 2);
+
+        map.raw.assert_pruned();
+
+        assert!(map.remove(&2).is_some());
+        map.raw.assert_pruned();
+
+        assert!(map.remove(&1).is_some());
+
+        map.raw.assert_pruned();
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn remove_par() {
+        let mut map = CloneConMap::new();
+        for i in 0..TEST_THREADS * TEST_BATCH {
+            map.insert(i, i);
+        }
+
+        thread::scope(|s| {
+            for t in 0..TEST_THREADS {
+                let map = &map;
+                s.spawn(move |_| {
+                    for i in 0..TEST_BATCH {
+                        let num = t * TEST_BATCH + i;
+                        let val = map.remove(&num).unwrap();
+                        assert_eq!(num, val.1);
+                        assert_eq!(num, val.0);
+                    }
+                });
+            }
+        })
+        .unwrap();
+
+        map.raw.assert_pruned();
+        assert!(map.is_empty());
+    }
+
+    fn iter_test_inner<S: BuildHasher>(map: CloneConMap<usize, usize, S>) {
+        for i in 0..TEST_BATCH_SMALL {
+            assert!(map.insert(i, i).is_none());
+        }
+
+        let mut extracted = map.iter().map(|v| v.1).collect::<Vec<_>>();
+        extracted.sort();
+        let expected = (0..TEST_BATCH_SMALL).collect::<Vec<_>>();
+        assert_eq!(expected, extracted);
+    }
+
+    #[test]
+    fn iter() {
+        let map = CloneConMap::new();
+        iter_test_inner(map);
+    }
+
+    #[test]
+    fn iter_collision() {
+        let map = CloneConMap::with_hasher(NoHasher);
+        iter_test_inner(map);
+    }
+
+    #[test]
+    fn collect() {
+        let map = (0..TEST_BATCH_SMALL)
+            .map(|i| (i, i))
+            .collect::<CloneConMap<_, _>>();
+
+        let mut extracted = map
+            .iter()
+            .map(|n| {
+                assert_eq!(n.0, n.1);
+                n.1
+            })
+            .collect::<Vec<_>>();
+
+        extracted.sort();
+        let expected = (0..TEST_BATCH_SMALL).collect::<Vec<_>>();
+        assert_eq!(expected, extracted);
+    }
+
+    #[test]
+    fn par_extend() {
+        let map = CloneConMap::new();
+        thread::scope(|s| {
+            for t in 0..TEST_THREADS {
+                let mut map = &map;
+                s.spawn(move |_| {
+                    let start = t * TEST_BATCH_SMALL;
+                    let iter = (start..start + TEST_BATCH_SMALL).map(|i| (i, i));
+                    map.extend(iter);
+                });
+            }
+        })
+        .unwrap();
+
+        let mut extracted = map
+            .iter()
+            .map(|n| {
+                assert_eq!(n.0, n.1);
+                n.1
+            })
+            .collect::<Vec<_>>();
+
+        extracted.sort();
+        let expected = (0..TEST_THREADS * TEST_BATCH_SMALL).collect::<Vec<_>>();
+        assert_eq!(expected, extracted);
+    }
+
+    #[cfg(feature = "rayon")]
+    #[test]
+    fn rayon_extend() {
+        let mut map = CloneConMap::new();
+        map.par_extend((0..TEST_BATCH_SMALL).into_par_iter().map(|i| (i, i)));
+
+        let mut extracted = map
+            .iter()
+            .map(|n| {
+                assert_eq!(n.0, n.1);
+                n.1
+            })
+            .collect::<Vec<_>>();
+        extracted.sort();
+
+        let expected = (0..TEST_BATCH_SMALL).collect::<Vec<_>>();
+        assert_eq!(expected, extracted);
+    }
+
+    #[cfg(feature = "rayon")]
+    #[test]
+    fn rayon_from_par_iter() {
+        let map = CloneConMap::from_par_iter((0..TEST_BATCH_SMALL).into_par_iter().map(|i| (i, i)));
+        let mut extracted = map
+            .iter()
+            .map(|n| {
+                assert_eq!(n.0, n.1);
+                n.1
+            })
+            .collect::<Vec<_>>();
+        extracted.sort();
+
+        let expected = (0..TEST_BATCH_SMALL).collect::<Vec<_>>();
+        assert_eq!(expected, extracted);
+    }
+}
