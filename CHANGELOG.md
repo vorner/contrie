@@ -1,3 +1,8 @@
+# 0.1.3
+
+* Support for rayon `FromParallelIterator` and `ParallelExtend` (under a feature
+  flag).
+
 # 0.1.2
 
 * Adding the `ConSet` type to have sets as well as maps.

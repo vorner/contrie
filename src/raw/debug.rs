@@ -35,7 +35,7 @@ where
             assert!(!flags.contains(NodeFlags::CONDEMNED));
 
             if sub.is_null() {
-                return;
+                // Do nothing here
             } else if flags.contains(NodeFlags::DATA) {
                 let data = unsafe { load_data::<C>(sub) };
                 assert!(!data.is_empty(), "Empty data nodes should not exist");
