@@ -28,8 +28,8 @@ rayon = { version = "~1", optional = true }
 crossbeam-utils = "~0.6"
 proptest = "~0.9.3"
 rayon = "~1"
-rand = "~0.6"
-version-sync = "~0.7"
+rand = "~0.7"
+version-sync = "~0.8"
 
 [profile.test]
 # Some tests are rather slow. Furthermore, optimalisations tend to provoke races and UBs to
