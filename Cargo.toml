@@ -1,6 +1,6 @@
 [package]
 name = "contrie"
-version = "0.1.3"
+version = "0.1.4"
 authors = ["Michal 'vorner' Vaner <vorner@vorner.cz>", "Edoardo Rossi <zeroed@posteo.net>", "Evan Cameron <cameron.evan@gmail.com>"]
 edition = "2018"
 description = "Concurrent map and set"

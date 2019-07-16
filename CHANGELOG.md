@@ -1,3 +1,8 @@
+# 0.1.4
+
+* Adding the `CloneConMap`, a map-like type cloning elements instead of using
+  `Arc`s.
+
 # 0.1.3
 
 * Support for rayon `FromParallelIterator` and `ParallelExtend` (under a feature
