@@ -247,7 +247,7 @@ unsafe fn drop_data<C: Config>(ptr: Shared<Inner>) {
         nf(ptr).contains(NodeFlags::DATA),
         "Tried to drop data from inner node pointer"
     );
-    drop(Owned::from_raw(ptr.as_raw() as usize as *mut Data<C>));
+    drop(ptr.into_owned());
 }
 
 /// An inner branching node of the trie.

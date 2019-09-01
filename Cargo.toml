@@ -1,7 +1,11 @@
 [package]
 name = "contrie"
 version = "0.1.4"
-authors = ["Michal 'vorner' Vaner <vorner@vorner.cz>", "Edoardo Rossi <zeroed@posteo.net>", "Evan Cameron <cameron.evan@gmail.com>"]
+authors = [
+    "Michal 'vorner' Vaner <vorner@vorner.cz>",
+    "Edoardo Rossi <zeroed@posteo.net>",
+    "Evan Cameron <cameron.evan@gmail.com>",
+]
 edition = "2018"
 description = "Concurrent map and set"
 documentation = "https://docs.rs/contrie"
@@ -19,7 +23,7 @@ maintenance = { status = "actively-developed" }
 [dependencies]
 arrayvec = "~0.4"
 bitflags = "~1"
-crossbeam-epoch = "~0.7"
+crossbeam-epoch = "~0.7.2"
 # TODO: Consider what to do with the union feature. Why is it still requiring nightly?
 smallvec = "~0.6"
 rayon = { version = "~1", optional = true }
