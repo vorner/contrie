@@ -269,17 +269,21 @@ struct Inner([Atomic<Inner>; LEVEL_CELLS]);
 // TODO: Compute the stack length based on the Payload size.
 type Data<C> = SmallVec<[<C as Config>::Payload; 2]>;
 
-enum TraverseState<C: Config, F> {
+enum TraverseState<'a, C: Config, Q, F> {
     Empty, // Invalid temporary state.
     Created(C::Payload),
-    Future { key: C::Key, constructor: F },
+    Future { key: &'a Q, constructor: F },
 }
 
-impl<C: Config, F: FnOnce(C::Key) -> C::Payload> TraverseState<C, F> {
-    fn key(&self) -> &C::Key {
+impl<C: Config, Q, F> TraverseState<'_, C, Q, F>
+where
+    C::Key: Borrow<Q>,
+    F: FnOnce(&Q) -> C::Payload
+{
+    fn key(&self) -> &Q {
         match self {
             TraverseState::Empty => unreachable!("Not supposed to live in the empty state"),
-            TraverseState::Created(payload) => payload.borrow(),
+            TraverseState::Created(payload) => payload.borrow().borrow(),
             TraverseState::Future { key, .. } => key,
         }
     }
@@ -505,16 +509,18 @@ where
 
     /// Inner implementation of traversing the tree, creating missing branches and doing
     /// *something* at the leaf.
-    fn traverse<'s, 'p, 'r, F>(
+    fn traverse<'s, 'p, 'r, Q, F>(
         &'s self,
-        mut state: TraverseState<C, F>,
+        mut state: TraverseState<C, Q, F>,
         mode: TraverseMode,
         pin: &'p Guard,
     ) -> Option<ExistingOrNew<&'r C::Payload>>
     where
         's: 'r,
         'p: 'r,
-        F: FnOnce(C::Key) -> C::Payload,
+        C::Key: Borrow<Q>,
+        Q: Eq + Hash,
+        F: FnOnce(&Q) -> C::Payload,
     {
         let hash = self.hash(state.key());
         let mut shift = 0;
@@ -585,7 +591,7 @@ where
             } else if flags.contains(NodeFlags::DATA) {
                 let data = unsafe { load_data::<C>(node) };
                 assert!(!data.is_empty(), "Empty data nodes must not be kept around");
-                if data[0].borrow() != state.key() && shift < mem::size_of_val(&hash) * 8 {
+                if data[0].borrow().borrow() != state.key() && shift < mem::size_of_val(&hash) * 8 {
                     assert!(data.len() == 1, "Collision node not deep enough");
                     // There's one data node at this pointer, but we want to place a different one
                     // here too. So we create a new level, push the old one down. Note that we
@@ -678,16 +684,17 @@ where
     /// Looks up a value or create (and insert) a new one.
     ///
     /// Either way, returns the value.
-    pub fn get_or_insert_with<'s, 'p, 'r, F>(
+    pub fn get_or_insert_with<'s, 'p, 'r, Q, F>(
         &'s self,
-        key: C::Key,
+        key: &Q,
         create: F,
         pin: &'p Guard,
     ) -> ExistingOrNew<&'r C::Payload>
     where
         's: 'r,
         'p: 'r,
-        F: FnOnce(C::Key) -> C::Payload,
+        C::Key: Borrow<Q>,
+        F: FnOnce(&Q) -> C::Payload,
     {
         let state = TraverseState::Future {
             key,

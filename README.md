@@ -15,6 +15,18 @@ significantly (at the cost of some features).
 Read [the documentation](https://docs.rs/contrie) before using, there are some
 quirks to be aware of.
 
+## Practical performance & project status
+
+It turns out the data structure is somewhat memory hungry and not performing
+that well in practice. This, and my lack of time leads to this project being a
+bit neglected.
+
+That being said, it is possible the performance & memory consumption is due to
+the simplifications (this always uses full nodes, the article compresses them to
+contain only the relevant pointers) and if someone else wants to play with it
+and improve the state of the project, I'll happily accept pull requests doing
+so.
+
 ## License
 
 Licensed under either of

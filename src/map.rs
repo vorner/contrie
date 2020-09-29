@@ -257,13 +257,14 @@ where
     ///
     /// * `V: ?Sized`.
     /// * You want to insert the same element into multiple maps.
-    pub fn get_or_insert_with_element<F>(
+    pub fn get_or_insert_with_element<Q, F>(
         &self,
-        key: K,
+        key: &Q,
         create: F,
     ) -> ExistingOrNew<Arc<Element<K, V>>>
     where
-        F: FnOnce(K) -> Arc<Element<K, V>>,
+        K: Borrow<Q>,
+        F: FnOnce(&Q) -> Arc<Element<K, V>>,
     {
         let pin = crossbeam_epoch::pin();
         self.raw
